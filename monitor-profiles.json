@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "this-pc": {
+      "left": "displayport1",
+      "center": "displayport1",
+      "right": "displayport1"
+    },
+    "other-pc": {
+      "left": "hdmi1",
+      "center": "hdmi1",
+      "right": "0x05"
+    }
+  }
+}

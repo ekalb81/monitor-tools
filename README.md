@@ -58,6 +58,7 @@ Samsung input-source readback is a little quirky here, so the tool uses explicit
 
 ## Files in this folder
 
+- `Install-ProfileHotkeys.ps1`: installs Windows shortcut hotkeys for the profiles
 - `Switch-MonitorInput.ps1`: the main tool
 - `monitor-profiles.json`: starter profiles for `this-pc` and `other-pc`
 - `Switch-To-This-PC.cmd`: wrapper that applies the `this-pc` profile
@@ -120,6 +121,19 @@ Short form:
 ```powershell
 .\This-PC.cmd
 ```
+
+Install keyboard shortcuts with the default hotkeys:
+
+```powershell
+.\Install-ProfileHotkeys.ps1
+```
+
+Default hotkeys:
+
+- `Ctrl+Alt+1` = `this-pc`
+- `Ctrl+Alt+2` = `other-pc`
+
+The installer creates Windows shortcuts in the Start Menu Programs folder under `Monitor Tools`, and the hotkeys are attached to those shortcuts.
 
 Set monitors directly without a profile:
 

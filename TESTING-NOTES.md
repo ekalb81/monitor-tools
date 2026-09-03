@@ -51,3 +51,6 @@ This file captures the important observed behaviors from interactive testing so 
 
 - The script was optimized so the fast switch paths do not fetch the full capabilities string before sending a source-switch command.
 - The embedded native type was updated to avoid `Add-Type` collisions when rerunning the script in the same PowerShell session.
+- The original Windows `.lnk` hotkey approach became unreliable even when the shortcuts still existed and pointed to the correct target.
+- Hotkeys now come from `Monitor-HotkeyListener.ps1`, which registers `Ctrl+Alt+1` and `Ctrl+Alt+2` directly with `RegisterHotKey`.
+- `Install-ProfileHotkeys.ps1` creates a Startup shortcut for the listener and restarts it when rerun.

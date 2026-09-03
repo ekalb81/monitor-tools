@@ -1,14 +1,14 @@
 {
   "profiles": {
     "this-pc": {
-      "left": "displayport1",
+      "left": "0x05",
       "center": "displayport1",
-      "right": "displayport1"
+      "right": "0x05"
     },
     "other-pc": {
-      "left": "hdmi1",
-      "center": "hdmi1",
-      "right": "0x05"
+      "left": "displayport1",
+      "center": "0x05",
+      "right": "displayport1"
     }
   }
 }

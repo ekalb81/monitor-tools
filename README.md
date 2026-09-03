@@ -58,7 +58,8 @@ Samsung input-source readback is a little quirky here, so the tool uses explicit
 
 ## Files in this folder
 
-- `Install-ProfileHotkeys.ps1`: installs Windows shortcut hotkeys for the profiles
+- `Install-ProfileHotkeys.ps1`: installs and restarts the background hotkey listener
+- `Monitor-HotkeyListener.ps1`: background listener that owns the global hotkeys
 - `Switch-MonitorInput.ps1`: the main tool
 - `monitor-profiles.json`: starter profiles for `this-pc` and `other-pc`
 - `Switch-To-This-PC.cmd`: wrapper that applies the `this-pc` profile
@@ -122,7 +123,7 @@ Short form:
 .\This-PC.cmd
 ```
 
-Install keyboard shortcuts with the default hotkeys:
+Install or restart keyboard shortcuts with the default hotkeys:
 
 ```powershell
 .\Install-ProfileHotkeys.ps1
@@ -133,7 +134,17 @@ Default hotkeys:
 - `Ctrl+Alt+1` = `this-pc`
 - `Ctrl+Alt+2` = `other-pc`
 
-The installer creates Windows shortcuts in the Start Menu Programs folder under `Monitor Tools`, and the hotkeys are attached to those shortcuts.
+The installer creates Start Menu shortcuts under `Monitor Tools`, adds a `Monitor Hotkeys` entry to your Startup folder, and restarts the listener immediately. The global hotkeys now come from the background listener process instead of Windows shortcut hotkeys.
+
+Listener log path:
+
+- `%LOCALAPPDATA%\MonitorTools\monitor-hotkeys.log`
+
+If the hotkeys stop responding again, rerun:
+
+```powershell
+.\Install-ProfileHotkeys.ps1
+```
 
 Set monitors directly without a profile:
 

@@ -1,0 +1,16 @@
+{
+  "profiles": {
+    "this-pc": {
+      "position-1": "displayport1",
+      "position-2": "displayport1",
+      "position-3": "displayport1",
+      "position-4": "displayport1"
+    },
+    "other-pc": {
+      "position-1": "hdmi1",
+      "position-2": "hdmi1",
+      "position-3": "hdmi1",
+      "position-4": "hdmi1"
+    }
+  }
+}

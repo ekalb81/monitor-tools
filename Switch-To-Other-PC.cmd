@@ -1,2 +1,2 @@
 @echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Switch-MonitorInput.ps1" -Profile other-pc %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Run-Profile.ps1" -Profile other-pc %*

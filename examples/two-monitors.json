@@ -1,0 +1,6 @@
+{
+  "profiles": {
+    "this-pc": { "left": "displayport1", "right": "displayport1" },
+    "other-pc": { "left": "hdmi1", "right": "hdmi1" }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "profiles": {
+    "this-pc": { "center": "displayport1" },
+    "other-pc": { "center": "hdmi1" }
+  }
+}

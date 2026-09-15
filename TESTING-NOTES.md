@@ -2,7 +2,27 @@
 
 This file captures the important observed behaviors from interactive testing so they are not lost.
 
-## Environment snapshot
+## Verified Twingo setup: 2026-09-15
+
+Host: Windows 11 personal desktop, AMD motherboard, called **Twingo**. WMI identifies all three monitors as Odyssey G60SD; the DDC inventory describes them as Generic PnP Monitor.
+
+The standard `hdmi1` code (`0x11`) did not visibly switch the center monitor to the other computer or return the side monitors to Twingo. DisplayPort selection (`0x0F`) worked. There was no launcher error log, and all three monitors remained readable.
+
+Each monitor was then tested separately, with an automatic return using the same acquired monitor handle. The user visually confirmed that **each monitor showed the other computer and returned to Twingo**. No `SaveCurrentSettings` call was used.
+
+| Position | Device at this test | Twingo (`this-pc`) | Other computer (`other-pc`) |
+| --- | --- | --- | --- |
+| left | `\\.\DISPLAY5` | HDMI: `0x05` | DisplayPort: `0x0F` |
+| center | `\\.\DISPLAY1` | DisplayPort: `0x0F` | HDMI: `0x05` |
+| right | `\\.\DISPLAY2` | HDMI: `0x05` | DisplayPort: `0x0F` |
+
+This resolves the old destination ambiguity: `0x05` selects the tested HDMI connection. Its destination depends on each monitor's wiring. The repository and installed profiles now use this verified mapping. Setup offers **HDMI (Samsung 0x05)** as an explicit option; standard HDMI aliases remain unchanged for other hardware.
+
+After updating the installed profiles (with a backup of the old file), both complete profiles were exercised through the installed `Run-Profile.ps1` launcher, with a six-second interval and automatic return. The user confirmed that all three monitors showed the other computer and returned to Twingo. The existing hotkeys target that same launcher and reload the corrected configuration on each invocation.
+
+The device/position mapping differs from the earlier snapshot below. Do not treat `DISPLAY` identifiers or position labels as permanent identities. These results apply to the tested wiring and monitors, not every Samsung monitor or HDMI port.
+
+## Historical environment snapshot
 
 - Model family reported by Windows: `G60SD_S27DG60xS`
 - Windows layout during testing:
@@ -36,7 +56,9 @@ This file captures the important observed behaviors from interactive testing so 
 - `right=hdmi1` and `right=hdmi1 -SaveCurrentSettings` did not produce the same visible result in testing.
 - Immediate VCP source readback should not be treated as the source of truth after a write. The on-screen switch behavior is more trustworthy than the immediate `GetVCPFeature(0x60)` value.
 
-## Current profile assumption
+## Historical profile assumption
+
+The old test described `right=0x05` as returning to this PC, but the old `other-pc` profile assigned it to the other computer. The September 15 tests above resolve that ambiguity for Twingo's current wiring. The following values document the superseded assumptions; new users should verify their own wiring and both directions.
 
 - `this-pc` profile:
   - `left` = `displayport1`

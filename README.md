@@ -1,152 +1,194 @@
-# Samsung Monitor DDC/CI Notes
+# Monitor Tools
 
-This folder contains the saved findings from the Samsung G60SD monitor driver inspection plus a PowerShell tool for switching inputs over DDC/CI.
+Switch monitors between two computers with a command or keyboard shortcut. The tool selects monitor inputs using DDC/CI, a monitor control protocol. It does **not** transfer keyboard, mouse, USB devices, or files.
 
-## What is installed
+## Install with Setup.exe
 
-- Samsung monitor INF package: `oem88.inf` (original name `s27dg60xs.inf`)
-- Samsung monitor profile file: `C:\WINDOWS\system32\spool\drivers\color\S27DG60xS.icm`
-- Active kernel driver: `C:\WINDOWS\System32\drivers\monitor.sys`
-- Driver provider/version: Samsung `1.0.0.0` dated `2024-01-31`
+1. Open **Setup.exe**. It contains the application files; no extraction or terminal commands are needed.
+2. Choose the input connected to **This PC** and **Other PC** for each detected monitor. Existing installed settings are prefilled. For the verified Twingo/G60SD setup, use **HDMI (Samsung 0x05)** for HDMI connections. You can also type a previously verified raw code for unusual hardware.
+3. Leave **Install hotkeys** selected for `Ctrl+Alt+1` / `Ctrl+Alt+2`, then click **Install**.
+4. Click **Finish**. Test one monitor in both directions before switching all screens.
 
-The Samsung package does not install a Samsung-specific control DLL or service. Windows binds these displays to the standard Microsoft monitor class driver (`monitor.sys`), so input switching happens through the normal Windows DDC/CI path in `Dxva2.dll`.
+Setup installs for your Windows account in `%LOCALAPPDATA%\Monitor Tools\app`, validates both profiles, and backs up replaced settings. It does not need administrator access or switch inputs during installation. You can delete the downloaded executable afterward. Reopen `Setup.exe` in the installed folder to change inputs or update hotkeys. Leaving the hotkey box unchecked skips shortcut installation; it does not remove existing shortcuts.
 
-## DDC/CI findings
+The executable requires Windows with .NET Framework 4.5 or newer and Windows PowerShell. This project's locally built executable is unsigned. Building it from source is documented below; `Setup.cmd` is an alternative guided console installer when using the source folder.
 
-The monitors reported MCCS `2.0` and advertised this VCP block:
+## Before you start
 
-```text
-vcp(02 04 05 08 10 12 14(05 08 0B 0C) 16 18 1A 52 60(01 03 04 11 12 0F 10) 62 8D FF)
-```
+- Use Windows with Windows PowerShell 5.1. PowerShell 7 can also run the scripts; launchers and hotkeys use Windows PowerShell.
+- Connect the computers to the monitors and check each monitor's on-screen menu for a DDC/CI setting. Input switching and control through your cables, docks, and adapters require testing.
+- No build, package installation, or Samsung driver installation is required. The [Samsung hardware notes](docs/HARDWARE-NOTES.md) describe one tested setup, not a compatibility guarantee.
+- Decide which computer will receive your commands and keyboard input. A hotkey runs on the computer receiving the keystroke; switching the picture does not move the keyboard connection.
 
-Relevant controls:
+## Manual setup and troubleshooting reference
 
-- `0x10` brightness
-- `0x12` contrast
-- `0x14` color preset
-- `0x16`, `0x18`, `0x1A` RGB gain
-- `0x52` active control
-- `0x60` input source
-- `0x62` speaker volume
-- `0x8D` audio mute / screen blank
+Users of `Setup.exe` can skip the manual installation steps. The discovery commands and one-monitor test below are also useful for diagnosing an installed copy; run them from `%LOCALAPPDATA%\Monitor Tools\app`.
 
-The probe also got valid replies from info/vendor codes `0xB6`, `0xC6`, `0xC8`, `0xC9`, `0xCA`, `0xCC`, `0xD6`, `0xDC`, `0xDF`, `0xE0`, `0xE5`, `0xE6`, `0xE9`, `0xF7`, and `0xFE`.
+### 1. Save the files and open PowerShell
 
-## Observed Samsung quirk
+On the repository page, choose **Code > Download ZIP** and extract it, or clone the repository if you use Git. Keep the entire folder in a permanent location before installing hotkeys.
 
-In inactive-link testing on the `right` monitor (`\\.\DISPLAY5`), the standard input-source write for `hdmi1` (`0x11`) did not visibly switch the monitor, even when followed by `SaveCurrentSettings`.
-
-The command that did work was:
+Open **Windows PowerShell** from Start. Change to the extracted folder, replacing this path with yours:
 
 ```powershell
-.\Switch-MonitorInput.ps1 -SetMonitor @('right=0x05')
+cd "$HOME\Documents\monitor-tools"
 ```
 
-`SaveCurrentSettings` was not required in the follow-up test. So for this monitor and this test path, raw `0x05` appears to be the effective value for the desired input, even though the monitor advertises standard HDMI values in its capabilities string. Treat this as an observed monitor-specific quirk, not a universal Samsung rule.
+Run the following commands in that window. `-ExecutionPolicy Bypass` applies to that invocation, without changing your saved execution policy. If your organization blocks script execution, follow its policy.
 
-The `right` monitor also remained readable from this PC while it was visually switched to the other computer, so inactive-link DDC/CI reads appear to work on this setup.
-
-## Active monitor inventory at probe time
-
-| Index | Position | Description | Current input | Notes |
-| --- | --- | --- | --- | --- |
-| `1` | `center` | `G60SD_S27DG60xS (DP VRR)` | `displayport1 [0x0F]` | Windows display device `\\.\DISPLAY1` |
-| `2` | `right` | `G60SD_S27DG60xS (HDMI VRR)` | `0x05 [0x05]` | Windows display device `\\.\DISPLAY5` |
-| `3` | `left` | `G60SD_S27DG60xS (HDMI VRR)` | `0x05 [0x05]` | Windows display device `\\.\DISPLAY2` |
-
-Samsung input-source readback is a little quirky here, so the tool uses explicit profiles instead of trying to infer a safe toggle target from the current value.
-
-## Files in this folder
-
-- `Install-ProfileHotkeys.ps1`: installs Windows shortcut hotkeys for the profiles
-- `Switch-MonitorInput.ps1`: the main tool
-- `monitor-profiles.json`: starter profiles for `this-pc` and `other-pc`
-- `Switch-To-This-PC.cmd`: wrapper that applies the `this-pc` profile
-- `Switch-To-Other-PC.cmd`: wrapper that applies the `other-pc` profile
-- `This-PC.cmd`: shorter wrapper for the `this-pc` profile
-- `Other-PC.cmd`: shorter wrapper for the `other-pc` profile
-- `TESTING-NOTES.md`: detailed observed behavior and test outcomes from this setup
-
-## Input names the script understands
-
-- `hdmi1`
-- `hdmi2`
-- `displayport1`
-- `displayport2`
-- `dvi1`
-- `dvi2`
-- `vga1`
-- raw decimal or hex values such as `17` or `0x11`
-
-Monitor targets can be:
-
-- numeric indexes like `1`, `2`, and `3`
-- position names like `left`, `center`, and `right`
-- `all`
-
-## Usage
-
-List the active monitors and their current inputs:
+### 2. Discover your monitors
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Switch-MonitorInput.ps1 -List
 ```
 
-Preview a profile before switching:
+| Output column | Meaning |
+| --- | --- |
+| `Index` | Target number for this enumeration; it may differ from Windows Settings display numbers. |
+| `Position` | Target name calculated from the current display arrangement. |
+| `DisplayDevice` / `Description` | Identifies the display in this inventory. |
+| `CurrentInput` | Reported input; some monitors return stale or unexpected values. |
+| `AdvertisedInputs` | Reported input names; these do not prove switching will work. |
+
+One monitor is `center`; two are `left` and `right`; three are `left`, `center`, and `right`. Four or more use `position-1`, `position-2`, etc. Ordering uses horizontal position, then vertical position. Re-run `-List` after connecting, disconnecting, or rearranging displays: names and indexes are not permanent hardware identities.
+
+### 3. Configure both destinations
+
+The bundled `monitor-profiles.json` matches the verified three-monitor Twingo setup: HDMI `0x05` on the sides and DisplayPort on the center for this PC; the reverse for the other computer. This is a hardware-specific configuration. **Choose and edit an example before running either launcher on a different setup.**
+
+| Monitors | Starting configuration |
+| --- | --- |
+| 1 | [one-monitor.json](examples/one-monitor.json) |
+| 2 | [two-monitors.json](examples/two-monitors.json) |
+| 3 | [three-monitors.json](examples/three-monitors.json) |
+| 4 | [four-monitors.json](examples/four-monitors.json) |
+
+For **two monitors**, copy the example and edit it:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Switch-MonitorInput.ps1 -Profile other-pc -WhatIf
+Copy-Item .\examples\two-monitors.json .\monitor-profiles.json
+notepad .\monitor-profiles.json
 ```
 
-Switch every configured monitor to the other computer:
+This replaces the bundled configuration. Back up an existing customized configuration before replacing it. For more than four monitors, extend the four-monitor example using names from `-List`.
+
+Examples assume this computer uses DisplayPort 1 and the other computer uses HDMI 1 on every monitor. Change each value to match the cable's actual **monitor input port**. Different monitors can have different wiring:
+
+```json
+{
+  "profiles": {
+    "this-pc": { "left": "displayport1", "right": "hdmi2" },
+    "other-pc": { "left": "hdmi1", "right": "displayport1" }
+  }
+}
+```
+
+Save valid JSON: double quotes, no comments, and no trailing commas. `this-pc` and `other-pc` are labels for your configured inputs, not automatic computer detection. If installing on the second computer too, configure destinations from that computer's perspective.
+
+### 4. Preview both profiles
 
 ```powershell
-.\Switch-To-Other-PC.cmd
+.\This-PC.cmd -WhatIf
+.\Other-PC.cmd -WhatIf
 ```
 
-Short form:
+A preview enumerates monitors and validates targets and input values without changing inputs. It does **not** verify cable routing, visible switching, or whether the monitor remains reachable afterward. Resolve configuration errors before continuing.
+
+### 5. Test one monitor and its return path
+
+Keep the monitor's physical input selector available. This example uses `center`, with this computer on DisplayPort 1 and the other on HDMI 1. **Replace the target and inputs with your own values.**
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Switch-MonitorInput.ps1 -SetMonitor center=hdmi1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Switch-MonitorInput.ps1 -SetMonitor center=displayport1
+```
+
+Check the visible picture in each direction. The return command must run on a computer that still has a DDC/CI connection to the monitor. If you cannot see the terminal, send keyboard input to that computer or restore the input using the monitor's physical controls. Inactive-input control worked on the original setup; it is not established for yours.
+
+Repeat for the remaining monitors, then apply the complete profiles:
 
 ```powershell
 .\Other-PC.cmd
-```
-
-Switch back to this computer:
-
-```powershell
-.\Switch-To-This-PC.cmd
-```
-
-Short form:
-
-```powershell
 .\This-PC.cmd
 ```
 
-Install keyboard shortcuts with the default hotkeys:
+All assignments are validated before the first write. A hardware failure can still leave earlier monitors switched; completed writes are not rolled back.
+
+### 6. Install hotkeys after both directions work
 
 ```powershell
-.\Install-ProfileHotkeys.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-ProfileHotkeys.ps1
 ```
 
-Default hotkeys:
+- `Ctrl+Alt+1`: apply `this-pc`.
+- `Ctrl+Alt+2`: apply `other-pc`.
 
-- `Ctrl+Alt+1` = `this-pc`
-- `Ctrl+Alt+2` = `other-pc`
+Shortcuts appear under **Monitor Tools** in your Start Menu Programs folder. They run without a visible window and record profile errors. To change keys, rerun the installer with `-ThisPcHotkey "CTRL+ALT+3" -OtherPcHotkey "CTRL+ALT+4"`.
 
-The installer creates Windows shortcuts in the Start Menu Programs folder under `Monitor Tools`, and the hotkeys are attached to those shortcuts.
+## Troubleshooting
 
-Set monitors directly without a profile:
+Run `-List`, then `.\Other-PC.cmd -WhatIf` or `.\This-PC.cmd -WhatIf` from an open PowerShell window so errors stay visible. Omit `-WhatIf` only when ready to test a real switch.
+
+| Symptom | Next step |
+| --- | --- |
+| No monitors, blank capabilities, or failed write | Check connections, monitor power, DDC/CI settings, and the cable/dock path. Record the error and monitor model. |
+| Missing monitor target | Re-run `-List`; update both profiles with current targets and remove absent monitors. |
+| Invalid JSON or input source | Check JSON syntax and supported input names below. |
+| Command completes but picture stays the same | Check physical ports and test one monitor. Input readback alone is not proof of switching. |
+| Samsung G60SD switches to DisplayPort but HDMI selection does nothing | Standard HDMI 1 sends `0x11`. The tested Twingo setup needs **HDMI (Samsung 0x05)**. See the verified mapping in `TESTING-NOTES.md`; test your own hardware before using this override. |
+| Hotkey does nothing | Run its profile visibly, check the error log and keyboard destination, and try different keys if another application uses them. |
+| Hotkeys fail after moving the project | Rerun the installer from the new folder. |
+| Cannot switch back | Restore the input with monitor controls. Recheck keyboard routing and inactive-input DDC/CI support. |
+
+Launchers and installed hotkeys save the **most recent failure** in `%LOCALAPPDATA%\Monitor Tools\last-error.log`. Read it with:
 
 ```powershell
-.\Switch-MonitorInput.ps1 -SetMonitor @('left=hdmi1','center=displayport1','right=hdmi1')
+Get-Content "$env:LOCALAPPDATA\Monitor Tools\last-error.log"
 ```
 
-## Starter profile assumptions
+The log includes UTC time, profile, configuration path, PowerShell version, and error. Success does not clear it; check its timestamp. A missing log means no failure was recorded, or the launcher could not start or write the log. Direct `Switch-MonitorInput.ps1` calls show errors in the terminal without creating this log. Reinstall older hotkeys to enable logging.
 
-`monitor-profiles.json` starts with the common setup where this PC uses `displayport1` and the other computer uses `hdmi1` on all three screens. Based on the observed Samsung quirk, the starter `other-pc` profile now uses raw `0x05` for the `right` monitor. The profile keys use `left`, `center`, and `right` so they stay readable. If one of your monitors uses `hdmi2` or `displayport2`, edit that file and change only that monitor's value.
+## Move or remove hotkeys
 
-With your current Windows layout, those positions line up like this:
+Keep the project folder in place while using shortcuts. After moving or updating the project, rerun the installer from its current location.
 
-- `left` = Windows display `2`
-- `center` = Windows display `1`
-- `right` = Windows display `3`
+Preview removal, then remove the two shortcuts:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-ProfileHotkeys.ps1 -Uninstall -WhatIf
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-ProfileHotkeys.ps1 -Uninstall
+```
+
+Removal leaves profiles, logs, and other Start Menu items in place. You can also manually delete **This PC Profile** and **Other PC Profile** from the Start Menu's **Monitor Tools** folder.
+
+## Command reference
+
+- Inputs: `hdmi1`, `hdmi2`, `displayport1`, `displayport2`, `dvi1`, `dvi2`, `vga1`, or decimal/hex codes from 0 to 255. Raw codes such as `0x05` require hardware-specific verification.
+- Targets: an `Index` or `Position` from `-List`, or `all`.
+- Alternative configuration: `.\Other-PC.cmd -ConfigPath .\my-profiles.json -WhatIf`. Hotkeys use `monitor-profiles.json` beside the scripts.
+- `-SaveCurrentSettings` requests persistence after a write. It was not required for the original observed switch.
+- `Switch-To-This-PC.cmd` and `Switch-To-Other-PC.cmd` are aliases for the shorter launchers.
+
+## Development and hardware evidence
+
+From a repository checkout, build the single-file Windows installer using the Windows .NET Framework compiler:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Setup.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Executable.ps1
+```
+
+Output: `dist\Setup.exe`. It embeds the scripts, documentation, examples, and tests. `installer\Setup.cs` contains the Windows Forms interface; `Install.ps1` handles profile validation, copying, and backups. Generated `build/` and `dist/` files are ignored by Git. No package downloads are required by the build script.
+
+`Setup.exe --verify-package` checks embedded-file extraction without displaying a window or contacting monitors. Developers can render a sample window with `Setup.exe --render-preview <absolute-png-path>`; that mode uses sample monitors and performs no installation.
+
+Run the hardware-free regression suite in fresh processes:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
+pwsh -NoProfile -File .\tests\Run-Tests.ps1
+```
+
+The second command requires PowerShell 7. Tests mock monitor calls and shortcut creation and use temporary files for logging checks. No external test framework is required.
+
+See [AGENTS.md](AGENTS.md) for contributor guidelines, [TESTING-NOTES.md](TESTING-NOTES.md) for physical outcomes, and [HARDWARE-NOTES.md](docs/HARDWARE-NOTES.md) for the original driver and capability investigation.

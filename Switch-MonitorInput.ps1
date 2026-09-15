@@ -3,6 +3,9 @@ param(
     [Parameter(ParameterSetName = "List")]
     [switch]$List,
 
+    [Parameter(ParameterSetName = "List")]
+    [switch]$PassThru,
+
     [Parameter(ParameterSetName = "SetAll", Mandatory = $true)]
     [string]$SetAll,
 
@@ -163,13 +166,13 @@ function Get-PrimaryInputName {
 }
 
 function Get-PositionLabels {
-    param([Parameter(Mandatory = $true)][object[]]$Inventory)
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Inventory)
 
-    $ordered = $Inventory |
+    $ordered = @($Inventory |
         Sort-Object `
             @{ Expression = { $_.MonitorLeft } }, `
             @{ Expression = { $_.MonitorTop } }, `
-            @{ Expression = { $_.Index } }
+            @{ Expression = { $_.Index } })
 
     $count = $ordered.Count
     if ($count -eq 1) {
@@ -338,46 +341,55 @@ function Get-PhysicalMonitorInventory {
         return $true
     }
 
-    [DdcCiNativeV2]::EnumDisplayMonitors([IntPtr]::Zero, [IntPtr]::Zero, $callback, [IntPtr]::Zero) | Out-Null
+    try {
+        [DdcCiNativeV2]::EnumDisplayMonitors([IntPtr]::Zero, [IntPtr]::Zero, $callback, [IntPtr]::Zero) | Out-Null
 
-    $index = 1
-    $inventory = foreach ($monitor in $handles) {
-        $capabilities = $null
-        if ($IncludeCapabilities) {
-            $capabilities = Get-CapabilitiesString -Handle $monitor.PhysicalMonitor.hPhysicalMonitor
+        $index = 1
+        $inventory = @(foreach ($monitor in $handles) {
+            $capabilities = $null
+            if ($IncludeCapabilities) {
+                $capabilities = Get-CapabilitiesString -Handle $monitor.PhysicalMonitor.hPhysicalMonitor
+            }
+
+            $inputVcp = $null
+            if ($IncludeCurrentInput) {
+                $inputVcp = Get-VcpValue -Handle $monitor.PhysicalMonitor.hPhysicalMonitor -Code 0x60
+            }
+
+            [pscustomobject]@{
+                Index              = $index
+                Position           = $null
+                Description        = $monitor.PhysicalMonitor.szPhysicalMonitorDescription
+                DisplayDevice      = $monitor.DisplayDevice
+                MonitorLeft        = $monitor.MonitorLeft
+                MonitorTop         = $monitor.MonitorTop
+                MonitorRight       = $monitor.MonitorRight
+                MonitorBottom      = $monitor.MonitorBottom
+                Handle             = $monitor.PhysicalMonitor.hPhysicalMonitor
+                Capabilities       = $capabilities
+                AdvertisedInputs   = if ($IncludeCapabilities) { @(Get-AdvertisedInputs -Capabilities $capabilities) } else { @() }
+                CurrentInputCode   = if ($null -ne $inputVcp) { [int]$inputVcp.Current } else { $null }
+                CurrentInputHex    = if ($null -ne $inputVcp) { "0x{0:X2}" -f [int]$inputVcp.Current } else { $null }
+                CurrentInputName   = if ($null -ne $inputVcp) { Get-PrimaryInputName -Code ([int]$inputVcp.Current) } else { $null }
+            }
+
+            $index++
+        })
+
+        $positionLabels = Get-PositionLabels -Inventory $inventory
+        foreach ($monitor in $inventory) {
+            $monitor.Position = $positionLabels[$monitor.Index]
         }
 
-        $inputVcp = $null
-        if ($IncludeCurrentInput) {
-            $inputVcp = Get-VcpValue -Handle $monitor.PhysicalMonitor.hPhysicalMonitor -Code 0x60
-        }
-
-        [pscustomobject]@{
-            Index              = $index
-            Position           = $null
-            Description        = $monitor.PhysicalMonitor.szPhysicalMonitorDescription
-            DisplayDevice      = $monitor.DisplayDevice
-            MonitorLeft        = $monitor.MonitorLeft
-            MonitorTop         = $monitor.MonitorTop
-            MonitorRight       = $monitor.MonitorRight
-            MonitorBottom      = $monitor.MonitorBottom
-            Handle             = $monitor.PhysicalMonitor.hPhysicalMonitor
-            Capabilities       = $capabilities
-            AdvertisedInputs   = if ($IncludeCapabilities) { @(Get-AdvertisedInputs -Capabilities $capabilities) } else { @() }
-            CurrentInputCode   = if ($null -ne $inputVcp) { [int]$inputVcp.Current } else { $null }
-            CurrentInputHex    = if ($null -ne $inputVcp) { "0x{0:X2}" -f [int]$inputVcp.Current } else { $null }
-            CurrentInputName   = if ($null -ne $inputVcp) { Get-PrimaryInputName -Code ([int]$inputVcp.Current) } else { $null }
-        }
-
-        $index++
+        return ,$inventory
     }
-
-    $positionLabels = Get-PositionLabels -Inventory $inventory
-    foreach ($monitor in $inventory) {
-        $monitor.Position = $positionLabels[$monitor.Index]
+    catch {
+        # Ownership transfers to the caller only after construction succeeds.
+        foreach ($monitor in $handles) {
+            [DdcCiNativeV2]::DestroyPhysicalMonitor($monitor.PhysicalMonitor.hPhysicalMonitor) | Out-Null
+        }
+        throw
     }
-
-    return ,@($inventory)
 }
 
 function Close-PhysicalMonitorInventory {
@@ -445,7 +457,8 @@ function Invoke-MonitorAssignment {
         [Parameter(Mandatory = $true)][object[]]$Assignments
     )
 
-    foreach ($assignment in $Assignments) {
+    # Resolve every target and input before the first hardware write.
+    $plan = @(foreach ($assignment in $Assignments) {
         $targetMonitors = if ($assignment.TargetIndex -eq "all") {
             $Inventory
         }
@@ -469,29 +482,40 @@ function Invoke-MonitorAssignment {
         $targetName = Get-PrimaryInputName -Code ([int]$targetCode)
 
         foreach ($monitor in $targetMonitors) {
-            $action = "set input on monitor $($monitor.Index) ($($monitor.Position)) [$($monitor.Description)] to $targetName"
-            if ($PSCmdlet.ShouldProcess($monitor.Description, $action)) {
-                if (-not [DdcCiNativeV2]::SetVCPFeature($monitor.Handle, 0x60, [uint32]$targetCode)) {
-                    $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-                    throw "Failed to set input on monitor $($monitor.Index) [$($monitor.Description)]. Win32 error: $errorCode"
-                }
-
-                if ($SaveCurrentSettings) {
-                    if (-not [DdcCiNativeV2]::SaveCurrentSettings($monitor.Handle)) {
-                        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-                        throw "Set the input on monitor $($monitor.Index) [$($monitor.Description)] but failed to save current settings. Win32 error: $errorCode"
-                    }
-                }
-            }
-
             [pscustomobject]@{
-                Index        = $monitor.Index
-                Position     = $monitor.Position
-                Description  = $monitor.Description
-                Requested    = $targetName
-                RequestedCode= "0x{0:X2}" -f [int]$targetCode
-                Saved        = $SaveCurrentSettings.IsPresent
+                Monitor    = $monitor
+                TargetCode = $targetCode
+                TargetName = $targetName
             }
+        }
+    })
+
+    foreach ($operation in $plan) {
+        $monitor = $operation.Monitor
+        $targetCode = $operation.TargetCode
+        $targetName = $operation.TargetName
+        $action = "set input on monitor $($monitor.Index) ($($monitor.Position)) [$($monitor.Description)] to $targetName"
+        if ($PSCmdlet.ShouldProcess($monitor.Description, $action)) {
+            if (-not [DdcCiNativeV2]::SetVCPFeature($monitor.Handle, 0x60, [uint32]$targetCode)) {
+                $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw "Failed to set input on monitor $($monitor.Index) [$($monitor.Description)]. Win32 error: $errorCode"
+            }
+
+            if ($SaveCurrentSettings) {
+                if (-not [DdcCiNativeV2]::SaveCurrentSettings($monitor.Handle)) {
+                    $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                    throw "Set the input on monitor $($monitor.Index) [$($monitor.Description)] but failed to save current settings. Win32 error: $errorCode"
+                }
+            }
+        }
+
+        [pscustomobject]@{
+            Index        = $monitor.Index
+            Position     = $monitor.Position
+            Description  = $monitor.Description
+            Requested    = $targetName
+            RequestedCode= "0x{0:X2}" -f [int]$targetCode
+            Saved        = $SaveCurrentSettings.IsPresent
         }
     }
 }
@@ -506,11 +530,16 @@ try {
                 throw "No DDC/CI-capable monitors were found."
             }
 
-            $inventory |
+            $displayInventory = $inventory |
                 Select-Object Index, Position, DisplayDevice, Description,
                 @{ Name = "CurrentInput"; Expression = { "$($_.CurrentInputName) [$($_.CurrentInputHex)]" } },
-                @{ Name = "AdvertisedInputs"; Expression = { ($_.AdvertisedInputs -join ", ") } } |
-                Format-Table -AutoSize
+                @{ Name = "AdvertisedInputs"; Expression = { ($_.AdvertisedInputs -join ", ") } }
+            if ($PassThru) {
+                $displayInventory
+            }
+            else {
+                $displayInventory | Format-Table -AutoSize
+            }
         }
 
         "SetAll" {

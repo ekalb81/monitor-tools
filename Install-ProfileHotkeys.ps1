@@ -1,7 +1,8 @@
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$ThisPcHotkey = "CTRL+ALT+1",
-    [string]$OtherPcHotkey = "CTRL+ALT+2"
+    [string]$OtherPcHotkey = "CTRL+ALT+2",
+    [switch]$Uninstall
 )
 
 Set-StrictMode -Version Latest
@@ -9,12 +10,26 @@ $ErrorActionPreference = "Stop"
 
 $scriptRoot = Split-Path -Parent $PSCommandPath
 $shortcutDirectory = Join-Path ([Environment]::GetFolderPath("Programs")) "Monitor Tools"
-$powerShellPath = Join-Path $PSHOME "powershell.exe"
+if ($Uninstall) {
+    foreach ($name in @("This PC Profile.lnk", "Other PC Profile.lnk")) {
+        $shortcutPath = Join-Path $shortcutDirectory $name
+        if ((Test-Path -LiteralPath $shortcutPath -PathType Leaf) -and $PSCmdlet.ShouldProcess($shortcutPath, "Remove profile hotkey")) {
+            Remove-Item -LiteralPath $shortcutPath
+        }
+    }
+    return
+}
+
+$powerShellPath = Join-Path ([Environment]::GetFolderPath("System")) "WindowsPowerShell\v1.0\powershell.exe"
+if (-not (Test-Path -LiteralPath $powerShellPath -PathType Leaf)) {
+    throw "Windows PowerShell executable was not found at '$powerShellPath'."
+}
 $wshShell = New-Object -ComObject WScript.Shell
 
 New-Item -ItemType Directory -Force -Path $shortcutDirectory | Out-Null
 
 function New-ProfileShortcut {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true)][string]$ShortcutName,
         [Parameter(Mandatory = $true)][string]$ProfileName,
@@ -22,9 +37,12 @@ function New-ProfileShortcut {
     )
 
     $shortcutPath = Join-Path $shortcutDirectory "$ShortcutName.lnk"
+    if (-not $PSCmdlet.ShouldProcess($shortcutPath, "Install profile hotkey $Hotkey")) {
+        return
+    }
     $shortcut = $wshShell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = $powerShellPath
-    $shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptRoot\Switch-MonitorInput.ps1`" -Profile $ProfileName"
+    $shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptRoot\Run-Profile.ps1`" -Profile $ProfileName"
     $shortcut.WorkingDirectory = $scriptRoot
     $shortcut.Description = "Switch monitor inputs to the $ProfileName profile."
     $shortcut.IconLocation = "$powerShellPath,0"

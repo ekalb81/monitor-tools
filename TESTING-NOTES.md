@@ -2,6 +2,22 @@
 
 This file captures the important observed behaviors from interactive testing so they are not lost.
 
+## Version 2 implementation checks: 2026-09-17
+
+Read-only discovery on Twingo identified all three monitors as **Odyssey G60SD**, with distinct `edid-serial` identities for left, center, and right. No input, brightness, or volume writes were performed during this implementation session. This confirms identity discovery on the current connections; it does not establish persistence across cable changes or another graphics driver.
+
+Automated suites use separate native mocks for monitor control and identity. They exercise named/partial profiles, scene normalization, preview behavior, partial failures, return attempts, configuration backups, diagnostics, and isolated installation files. Run `tests/Run-AllTests.ps1` on Windows PowerShell 5.1 and PowerShell 7, and add `-IncludeExecutable` on 5.1 after building for the executable/UI bridge tests.
+
+Observed implementation validation: `Run-AllTests.ps1 -IncludeExecutable` passed on Windows PowerShell **5.1.26100.9444**; `Run-AllTests.ps1` passed on PowerShell **7.6.5**. The six headless editor/setup behavior cases passed, including duplicate friendly labels, scene/hotkey preservation, legacy targets, and calibration invalidation. Version **2.0.0** compiled successfully; embedded-package verification and sample setup rendering passed. `git diff --check` passed. The produced installer is unsigned; signing and remote release publication were not exercised.
+
+The new guided calibration flow, brightness/volume scenes, and tray hotkeys still need user-observed testing on the actual desk. Earlier confirmed `0x05`/`0x0F` input results below remain the hardware evidence; software test passes are not visual switching verification.
+
+## Automated visual integration (September 17, 2026)
+
+Nine client-area fixtures render the compiled setup and profile editor with synthetic data at 96 DPI. They cover default/verified/failed/busy setup states, compact sizes, six-monitor scrolling, and editing/saving a brightness scene. Initial layout assertions caught the editor grid covering its instructions and clipped column headings; docking order and automatic heading height were corrected. Reviewed PNG baselines and repeated local comparisons pass. Comparator self-tests also reject missing content, moved controls, dimension changes, and corrupt inputs.
+
+These tests run with `Run-AllTests.ps1 -IncludeExecutable` and in the Windows workflow. Reports live in `build/visual-tests/`; baseline updates are explicit and disabled in CI. Local verification used Windows 11; the pinned `windows-2022` hosted workflow has not yet been run for this change. Classic control rendering reduces theme differences but does not establish high-DPI or physical DDC/CI coverage.
+
 ## Verified Twingo setup: 2026-09-15
 
 Host: Windows 11 personal desktop, AMD motherboard, called **Twingo**. WMI identifies all three monitors as Odyssey G60SD; the DDC inventory describes them as Generic PnP Monitor.

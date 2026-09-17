@@ -27,6 +27,13 @@ public static class MockDdcCiForTests
     public static int MonitorCount;
     public static string Capabilities;
     public static int FailWriteOn;
+    public static int TransientFailuresRemaining;
+    public static int PermanentFailuresRemaining;
+    public static int LastError;
+    public static uint BrightnessMaximum;
+    public static uint VolumeMaximum;
+    public static int CapabilityRequests;
+    public static uint CapabilityLengthOverride;
     public static readonly List<int> Acquired = new List<int>();
     public static readonly List<int> Released = new List<int>();
     public static readonly List<string> Writes = new List<string>();
@@ -37,6 +44,13 @@ public static class MockDdcCiForTests
         MonitorCount = count;
         Capabilities = "vcp(60(0F 11))";
         FailWriteOn = 0;
+        TransientFailuresRemaining = 0;
+        PermanentFailuresRemaining = 0;
+        LastError = 0;
+        BrightnessMaximum = 200;
+        VolumeMaximum = 100;
+        CapabilityRequests = 0;
+        CapabilityLengthOverride = 0;
         Acquired.Clear();
         Released.Clear();
         Writes.Clear();
@@ -79,12 +93,13 @@ public static class MockDdcCiForTests
 
     public static bool GetCapabilitiesStringLength(IntPtr monitor, out uint length)
     {
-        length = (uint)Capabilities.Length + 1;
+        length = CapabilityLengthOverride > 0 ? CapabilityLengthOverride : (uint)Capabilities.Length + 1;
         return true;
     }
 
     public static bool CapabilitiesRequestAndCapabilitiesReply(IntPtr monitor, StringBuilder buffer, uint length)
     {
+        CapabilityRequests++;
         buffer.Append(Capabilities);
         return true;
     }
@@ -93,20 +108,64 @@ public static class MockDdcCiForTests
     {
         type = 0;
         current = 15;
-        maximum = 255;
+        maximum = code == 0x10 ? BrightnessMaximum : (code == 0x62 ? VolumeMaximum : 255);
         return true;
     }
 
     public static bool SetVCPFeature(IntPtr monitor, byte code, uint value)
     {
-        if ((int)monitor == FailWriteOn) return false;
+        if (TransientFailuresRemaining > 0)
+        {
+            TransientFailuresRemaining--;
+            LastError = 121;
+            return false;
+        }
+        if (PermanentFailuresRemaining > 0)
+        {
+            PermanentFailuresRemaining--;
+            LastError = 5;
+            return false;
+        }
+        if ((int)monitor == FailWriteOn)
+        {
+            LastError = 5;
+            return false;
+        }
         Writes.Add(monitor + ":" + code + ":" + value);
         return true;
     }
+
+    public static int GetLastError() { return LastError; }
 
     public static bool SaveCurrentSettings(IntPtr monitor)
     {
         Saves.Add((int)monitor);
         return true;
+    }
+}
+
+// Deterministic identity seam. The engine replaces MonitorIdentityNativeV1 with
+// this type without invoking display or registry APIs.
+public static class MockMonitorIdentityForTests
+{
+    public sealed class IdentityInfo
+    {
+        public string Manufacturer, ProductCode, Model, Serial, DevicePath, IdentityStatus, StableMaterial;
+    }
+
+    public static bool DuplicateIdentity;
+
+    public static IdentityInfo GetIdentity(string displayDevice, string description)
+    {
+        string suffix = DuplicateIdentity ? "shared" : displayDevice.Replace("MockDisplay", "");
+        return new IdentityInfo {
+            Manufacturer = "TST",
+            ProductCode = "0001",
+            Model = "Mock Model " + suffix,
+            Serial = "SERIAL-" + suffix,
+            DevicePath = "mock://display/" + suffix,
+            IdentityStatus = "edid-serial",
+            StableMaterial = "tst|0001|serial-" + suffix
+        };
     }
 }

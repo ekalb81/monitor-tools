@@ -10,12 +10,20 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('monitor-tools-exe-test-' + [G
 $window = $null
 try {
     foreach ($name in @('Install.ps1', 'Setup.cmd', 'Run-Profile.ps1', 'This-PC.cmd', 'Other-PC.cmd',
-        'Switch-To-This-PC.cmd', 'Switch-To-Other-PC.cmd', 'README.md')) {
+        'Switch-To-This-PC.cmd', 'Switch-To-Other-PC.cmd', 'README.md', 'Repair.ps1', 'Uninstall.ps1',
+        'MonitorTools.Common.ps1', 'VERSION')) {
         Copy-Item -LiteralPath (Join-Path $repo $name) -Destination (Join-Path $testRoot $name)
     }
     Copy-Item -LiteralPath (Join-Path $repo 'installer\Detect-Monitors.ps1') -Destination $testRoot
     Set-Content -LiteralPath (Join-Path $testRoot 'Install-ProfileHotkeys.ps1') -Value 'throw "Hotkeys must be disabled in this smoke test."'
-    $switchSource = (Get-Content -LiteralPath (Join-Path $repo 'Switch-MonitorInput.ps1') -Raw).Replace('DdcCiNativeV2', 'MockDdcCiForTests')
+    $rawSwitchSource = Get-Content -LiteralPath (Join-Path $repo 'Switch-MonitorInput.ps1') -Raw
+    if (-not $rawSwitchSource.Contains('public static class DdcCiNativeV3') -or -not $rawSwitchSource.Contains('public static class MonitorIdentityNativeV1')) {
+        throw 'Mock injection markers changed; refusing to run executable tests.'
+    }
+    $switchSource = $rawSwitchSource.
+        Replace('DdcCiNativeV3', 'MockDdcCiForTests').
+        Replace('MonitorIdentityNativeV1', 'MockMonitorIdentityForTests')
+    if ($switchSource.Contains('DdcCiNativeV3') -or $switchSource.Contains('MonitorIdentityNativeV1')) { throw 'Mock injection was incomplete; refusing to run executable tests.' }
     $tokens = $null
     $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseInput($switchSource, [ref]$tokens, [ref]$errors)
@@ -41,9 +49,9 @@ try {
 
     $installedPath = Join-Path $testRoot 'Installed Files'
     $configuration = Join-Path $repo 'examples\two-monitors.json'
-    $arguments = '-Unattended -ConfigurationFile "' + $configuration + '" -InstallDirectory "' + $installedPath + '"'
+    $arguments = '-Unattended -ConfigurationFile "' + $configuration + '" -InstallDirectory "' + $installedPath + '" -SkipRegistration'
     [void]$runScript.Invoke($window, [object[]]@('Install.ps1', $arguments))
-    if (-not (Test-Path -LiteralPath (Join-Path $installedPath 'monitor-profiles.json'))) { throw 'Executable installation bridge did not save profiles.' }
+    if (-not (Test-Path -LiteralPath (Join-Path ($installedPath + '.data') 'monitor-profiles.json'))) { throw 'Executable installation bridge did not save separate profiles.' }
 
     $readInput = $windowType.GetMethod('ReadInput', $flags)
     $box = New-Object Windows.Forms.ComboBox

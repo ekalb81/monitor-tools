@@ -42,7 +42,12 @@ foreach ($path in @($switchPath, $installerPath, $launcherPath)) {
 Add-Type -Path (Join-Path $PSScriptRoot "MockDdcCi.cs")
 # Exercise the entire production script, replacing only its native type in memory.
 # Using a distinct type also prevents tests from replacing the real type in a session.
-$source = (Get-Content -LiteralPath $switchPath -Raw).Replace('DdcCiNativeV2', 'MockDdcCiForTests')
+$rawSwitchSource = Get-Content -LiteralPath $switchPath -Raw
+if (-not $rawSwitchSource.Contains('public static class DdcCiNativeV3') -or -not $rawSwitchSource.Contains('public static class MonitorIdentityNativeV1')) {
+    throw 'Mock injection markers changed; refusing to run monitor tests.'
+}
+$source = $rawSwitchSource.Replace('DdcCiNativeV3', 'MockDdcCiForTests').Replace('MonitorIdentityNativeV1', 'MockMonitorIdentityForTests')
+if ($source.Contains('DdcCiNativeV3') -or $source.Contains('MonitorIdentityNativeV1')) { throw 'Mock injection was incomplete; refusing to run monitor tests.' }
 $switchScript = [scriptblock]::Create($source)
 
 [MockDdcCiForTests]::Reset(0)
@@ -119,7 +124,7 @@ Write-Output 'PASS: successful switches, saving, and profile previews'
 
 [MockDdcCiForTests]::Reset(2)
 [MockDdcCiForTests]::Capabilities = 'vcp(60(GG))'
-Assert-Throws { & $switchScript -List -ConfigPath $configPath } '*recognizable digits*'
+Assert-Throws { & $switchScript -List -IncludeCapabilities -ConfigPath $configPath } '*recognizable digits*'
 Assert-Equal ([MockDdcCiForTests]::Acquired.Count) 2 'Failure must occur after acquisition'
 Assert-HandlesReleased
 
@@ -153,6 +158,7 @@ $testDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("monitor-tools-tes
 try {
     $testLauncher = Join-Path $testDirectory 'Run-Profile.ps1'
     Copy-Item -LiteralPath $launcherPath -Destination $testLauncher
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'MonitorTools.Common.ps1') -Destination $testDirectory
     Copy-Item -LiteralPath $configPath -Destination (Join-Path $testDirectory 'monitor-profiles.json')
     [System.IO.File]::WriteAllText((Join-Path $testDirectory 'Switch-MonitorInput.ps1'), $source)
     $testLog = Join-Path $testDirectory 'logs\last-error.log'

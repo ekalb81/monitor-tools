@@ -3,11 +3,17 @@ param(
     [string]$InstallDirectory,
     [switch]$Unattended,
     [string]$ConfigurationFile,
-    [switch]$EnableHotkeys
+    [switch]$EnableHotkeys,
+    [switch]$StartAtLogin,
+    [switch]$PreserveRegistration,
+    [switch]$SkipRegistration,
+    [ValidateRange(1, 300)][int]$DeploymentMutexWaitSeconds = 60,
+    [Parameter(DontShow = $true)][switch]$TestFailureAfterActivation,
+    [Parameter(DontShow = $true)][switch]$TestFailureBeforeActivation
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 
 function Read-YesNo {
     param([string]$Prompt, [bool]$Default = $false)
@@ -32,57 +38,153 @@ function Read-MonitorInput {
     }
 }
 
+function ConvertTo-CurrentConfiguration {
+    param([Parameter(Mandatory = $true)][string]$Json, [bool]$UseHotkeys)
+    $config = $Json | ConvertFrom-Json
+    # Validate before migration so a future schema is rejected rather than silently downgraded.
+    Test-MonitorToolsConfig -Config $config | Out-Null
+    if ($null -eq $config.PSObject.Properties['schemaVersion']) {
+        $config | Add-Member -NotePropertyName schemaVersion -NotePropertyValue 2
+    }
+    else { $config.schemaVersion = 2 }
+    if ($UseHotkeys) {
+        if ($null -eq $config.PSObject.Properties['hotkeys']) {
+            $config | Add-Member -NotePropertyName hotkeys -NotePropertyValue ([pscustomobject]@{})
+        }
+        foreach ($default in @{ 'this-pc' = 'Ctrl+Alt+1'; 'other-pc' = 'Ctrl+Alt+2' }.GetEnumerator()) {
+            if ($null -eq $config.hotkeys.PSObject.Properties[$default.Key]) {
+                $config.hotkeys | Add-Member -NotePropertyName $default.Key -NotePropertyValue $default.Value
+            }
+        }
+    }
+    elseif ($null -ne $config.PSObject.Properties['hotkeys']) {
+        $config.PSObject.Properties.Remove('hotkeys')
+    }
+    return ($config | ConvertTo-Json -Depth 20)
+}
+
+function Assert-SafeSiblingPath {
+    param([string]$Candidate, [string]$Parent, [string]$ExpectedPrefix)
+    $resolvedCandidate = [IO.Path]::GetFullPath($Candidate)
+    $resolvedParent = [IO.Path]::GetFullPath($Parent).TrimEnd('\') + '\'
+    if (-not $resolvedCandidate.StartsWith($resolvedParent, [StringComparison]::OrdinalIgnoreCase) -or
+        (Split-Path -Leaf $resolvedCandidate) -notlike "$ExpectedPrefix*") {
+        throw "Refusing to modify unexpected staging path '$resolvedCandidate'."
+    }
+}
+
+function Get-Sha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $stream = [IO.File]::OpenRead($Path)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+    finally { $algorithm.Dispose(); $stream.Dispose() }
+}
+
+function Get-DeploymentMutexName {
+    param([string]$Path)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $material = [Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($Path).ToUpperInvariant())
+        $key = [BitConverter]::ToString($algorithm.ComputeHash($material)).Replace('-', '')
+        return 'Local\MonitorTools.Install.' + $key
+    }
+    finally { $algorithm.Dispose() }
+}
+
 $requiredFiles = @(
     'Switch-MonitorInput.ps1', 'Run-Profile.ps1', 'Install-ProfileHotkeys.ps1',
-    'Install.ps1', 'Setup.cmd', 'This-PC.cmd', 'Other-PC.cmd',
-    'Switch-To-This-PC.cmd', 'Switch-To-Other-PC.cmd', 'README.md'
+    'Install.ps1', 'Repair.ps1', 'Uninstall.ps1', 'MonitorTools.Common.ps1', 'Setup.cmd',
+    'This-PC.cmd', 'Other-PC.cmd', 'Switch-To-This-PC.cmd', 'Switch-To-Other-PC.cmd',
+    'README.md', 'VERSION'
 )
 foreach ($name in $requiredFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name) -PathType Leaf)) {
         throw "Setup is missing '$name'. Extract the entire download before running Setup.cmd."
     }
 }
-if ([string]::IsNullOrWhiteSpace($InstallDirectory)) {
-    $InstallDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Monitor Tools\app'
-}
+
+$defaultInstallDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Monitor Tools\app'
+if ([string]::IsNullOrWhiteSpace($InstallDirectory)) { $InstallDirectory = $defaultInstallDirectory }
 $InstallDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDirectory)
-$configPath = Join-Path $InstallDirectory 'monitor-profiles.json'
+$installParent = Split-Path -Parent $InstallDirectory
+$dataDirectory = if ($InstallDirectory.Equals($defaultInstallDirectory, [StringComparison]::OrdinalIgnoreCase)) {
+    Join-Path $installParent 'data'
+}
+else { "$InstallDirectory.data" }
+$configPath = Join-Path $dataDirectory 'monitor-profiles.json'
+
+. (Join-Path $PSScriptRoot 'MonitorTools.Common.ps1')
+if (Test-Path -LiteralPath (Join-Path $InstallDirectory 'config-path.txt') -PathType Leaf) {
+    try {
+        $existingPointer = Get-MonitorToolsConfigPath -Root $InstallDirectory
+        if (-not [string]::IsNullOrWhiteSpace($existingPointer) -and (Test-Path -LiteralPath $existingPointer -PathType Leaf)) {
+            $configPath = $existingPointer
+            $dataDirectory = Split-Path -Parent $configPath
+        }
+    }
+    catch { }
+}
+$legacyConfigPath = Join-Path $InstallDirectory 'monitor-profiles.json'
+$legacyConfigBytes = if (Test-Path -LiteralPath $legacyConfigPath -PathType Leaf) {
+    [IO.File]::ReadAllBytes($legacyConfigPath)
+}
+else { $null }
 $switchPath = Join-Path $PSScriptRoot 'Switch-MonitorInput.ps1'
 
-Write-Host "`nMonitor Tools Setup"
-Write-Host "Install location: $InstallDirectory"
-Write-Host 'Setup reads monitors and previews your choices. It does not switch inputs.'
-Write-Host 'Connect both computers to the monitors. Check the input labels on the monitor ports.'
-Write-Host 'This PC means the computer running setup. Keyboard and mouse connections do not move with the picture.'
-Write-Host "`nDetecting monitors..."
-$monitors = @(& $switchPath -List -PassThru)
-$monitors | Format-Table Index, Position, Description, CurrentInput -AutoSize | Out-Host
+if (Test-Path -LiteralPath $InstallDirectory -PathType Container) {
+    $existingItems = @(Get-ChildItem -LiteralPath $InstallDirectory -Force)
+    if ($existingItems.Count -gt 0) {
+        $manifestPath = Join-Path $InstallDirectory 'install-manifest.json'
+        $recognized = $false
+        if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+            try { $recognized = ((Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).product -eq 'Monitor Tools') } catch { }
+        }
+        $legacyRecognized = (Test-Path -LiteralPath (Join-Path $InstallDirectory 'Switch-MonitorInput.ps1') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $InstallDirectory 'Install.ps1') -PathType Leaf)
+        if (-not $recognized -and -not $legacyRecognized) {
+            throw "InstallDirectory '$InstallDirectory' is not empty and is not a recognized Monitor Tools installation. Choose a new folder."
+        }
+        $reparsePoint = Get-ChildItem -LiteralPath $InstallDirectory -Force -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } | Select-Object -First 1
+        if ($null -ne $reparsePoint) { throw "InstallDirectory contains a reparse point and cannot be upgraded safely: $($reparsePoint.FullName)" }
+    }
+}
 
+Write-Host "`nMonitor Tools Setup"
+Write-Host "Application location: $InstallDirectory"
+Write-Host "Configuration location: $configPath"
+Write-Host 'Setup reads monitors and previews your choices. It does not switch inputs.'
+$monitors = @()
+if (-not $PreserveRegistration) {
+    Write-Host "`nDetecting monitors..."
+    $monitors = @(& $switchPath -List -PassThru)
+    $monitors | Format-Table Index, Position, Description, CurrentInput -AutoSize | Out-Host
+}
+
+$existingConfigPath = if (Test-Path -LiteralPath $configPath -PathType Leaf) { $configPath }
+elseif (Test-Path -LiteralPath $legacyConfigPath -PathType Leaf) { $legacyConfigPath }
+else { $null }
 $keepProfiles = $false
 if ($Unattended -and [string]::IsNullOrWhiteSpace($ConfigurationFile)) {
-    throw 'Unattended setup requires a ConfigurationFile containing both profiles.'
+    if ($null -eq $existingConfigPath) { throw 'Unattended setup requires ConfigurationFile for a new installation.' }
+    $keepProfiles = $true
 }
-if (-not $Unattended -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-    Write-Host "Existing profiles found: $configPath"
+elseif (-not $Unattended -and $null -ne $existingConfigPath) {
+    Write-Host "Existing profiles found: $existingConfigPath"
     $keepProfiles = Read-YesNo 'Keep these profiles while updating the installed files?' -Default $true
 }
 
-if ($Unattended) {
-    $configJson = Get-Content -LiteralPath $ConfigurationFile -Raw
-    [void]($configJson | ConvertFrom-Json)
+if (-not [string]::IsNullOrWhiteSpace($ConfigurationFile)) {
+    $configJson = [IO.File]::ReadAllText($ConfigurationFile)
 }
 elseif ($keepProfiles) {
-    $configJson = Get-Content -LiteralPath $configPath -Raw
-    # Parsing here provides an immediate error before any installed file changes.
-    [void]($configJson | ConvertFrom-Json)
+    $configJson = [IO.File]::ReadAllText($existingConfigPath)
 }
 else {
     $thisPc = [ordered]@{}
     $otherPc = [ordered]@{}
     Write-Host "`nChoose the input connected to each computer, for each monitor:"
-    Write-Host '1 = DisplayPort 1    2 = HDMI 1    3 = HDMI 2    4 = DisplayPort 2'
-    Write-Host '5 = DVI 1           6 = DVI 2     7 = VGA 1'
-    Write-Host 'You can also enter an input name or a hex code you have already verified on this hardware.'
     foreach ($monitor in $monitors) {
         Write-Host "`n$($monitor.Position): $($monitor.Description) [$($monitor.DisplayDevice)]"
         $thisPc[$monitor.Position] = Read-MonitorInput 'Input connected to THIS computer'
@@ -92,78 +194,218 @@ else {
         ConvertTo-Json -Depth 5
 }
 
-Write-Host "`nReview both profiles (no input changes):"
-$previewPath = [System.IO.Path]::GetTempFileName()
-try {
-    [System.IO.File]::WriteAllText($previewPath, $configJson)
-    foreach ($profile in @('this-pc', 'other-pc')) {
-        Write-Host "`n$profile"
-        try {
-            & $switchPath -Profile $profile -ConfigPath $previewPath -WhatIf | Out-Host
-        }
-        catch {
-            throw "Profile preview failed: $($_.Exception.Message) Re-run setup and configure inputs again. Installed files have not been changed."
+$trayAvailable = Test-Path -LiteralPath (Join-Path $PSScriptRoot 'app\MonitorTools.exe') -PathType Leaf
+$installHotkeys = if ($PreserveRegistration) {
+    ($configJson | ConvertFrom-Json).PSObject.Properties['hotkeys'] -ne $null
+} elseif ($Unattended) { $EnableHotkeys.IsPresent } else {
+    Read-YesNo 'Enable Ctrl+Alt+1 / Ctrl+Alt+2 after testing both directions?'
+}
+$existingStartup = $false
+if ($PreserveRegistration -and -not $SkipRegistration) {
+    $existingStartup = $null -ne (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name MonitorTools -ErrorAction SilentlyContinue)
+}
+$startTray = if ($PreserveRegistration) { $existingStartup } elseif ($Unattended) { $StartAtLogin.IsPresent } elseif ($trayAvailable) {
+    Read-YesNo 'Start Monitor Tools automatically when you sign in?' -Default $true
+}
+else { $false }
+$configJson = ConvertTo-CurrentConfiguration -Json $configJson -UseHotkeys ($installHotkeys -and $trayAvailable)
+Test-MonitorToolsConfig -Config ($configJson | ConvertFrom-Json) | Out-Null
+
+if (-not $PreserveRegistration) {
+    Write-Host "`nReview profiles (no input changes):"
+    $previewPath = [IO.Path]::GetTempFileName()
+    try {
+        [IO.File]::WriteAllText($previewPath, $configJson)
+        $previewConfig = $configJson | ConvertFrom-Json
+        foreach ($profile in @($previewConfig.profiles.PSObject.Properties.Name)) {
+            try { & $switchPath -Profile $profile -ConfigPath $previewPath -WhatIf | Out-Host }
+            catch { throw "Profile preview failed: $($_.Exception.Message) Installed files have not been changed." }
         }
     }
-}
-finally {
-    Remove-Item -LiteralPath $previewPath -Force
+    finally { Remove-Item -LiteralPath $previewPath -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host 'A preview checks assignments, not physical switching or the return path.'
-$installHotkeys = if ($Unattended) { $EnableHotkeys.IsPresent } else {
-    Read-YesNo 'Have you already tested both directions and want Ctrl+Alt+1 / Ctrl+Alt+2 hotkeys now?'
-}
-Write-Host "`nFiles and profiles will be installed in: $InstallDirectory"
 Write-Host "Install hotkeys: $installHotkeys"
+Write-Host "Start at sign-in: $startTray"
 if (-not $Unattended -and -not (Read-YesNo 'Install with these settings?' -Default $true)) {
     Write-Host 'Setup cancelled. Installed files and shortcuts were not changed.'
     return
 }
 
-[void][System.IO.Directory]::CreateDirectory($InstallDirectory)
-$files = @($requiredFiles | ForEach-Object { Get-Item -LiteralPath (Join-Path $PSScriptRoot $_) })
-foreach ($name in @('AGENTS.md', 'TESTING-NOTES.md', 'docs', 'examples', 'tests')) {
-    $optionalPath = Join-Path $PSScriptRoot $name
-    if (Test-Path -LiteralPath $optionalPath) {
-        $files += @(Get-ChildItem -LiteralPath $optionalPath -File -Recurse)
-    }
-}
-foreach ($file in $files) {
-    $relativePath = $file.FullName.Substring($PSScriptRoot.Length).TrimStart('\', '/')
-    $destination = Join-Path $InstallDirectory $relativePath
-    if (-not $file.FullName.Equals($destination, [StringComparison]::OrdinalIgnoreCase)) {
-        [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
-        Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
-    }
+[void][IO.Directory]::CreateDirectory($installParent)
+$leaf = Split-Path -Leaf $InstallDirectory
+$stagePath = Join-Path $installParent ('.' + $leaf + '.stage-' + [Guid]::NewGuid().ToString('N'))
+$rollbackPath = Join-Path $installParent ('.' + $leaf + '.rollback-' + [Guid]::NewGuid().ToString('N'))
+Assert-SafeSiblingPath $stagePath $installParent ('.' + $leaf + '.stage-')
+Assert-SafeSiblingPath $rollbackPath $installParent ('.' + $leaf + '.rollback-')
+$appActivated = $false
+$oldMoved = $false
+$installSucceeded = $false
+$previousConfig = $null
+$deploymentMutex = [Threading.Mutex]::new($false, (Get-DeploymentMutexName -Path $InstallDirectory))
+$deploymentLocked = $false
+try { $deploymentLocked = $deploymentMutex.WaitOne($DeploymentMutexWaitSeconds * 1000) }
+catch [Threading.AbandonedMutexException] { $deploymentLocked = $true }
+if (-not $deploymentLocked) {
+    $deploymentMutex.Dispose()
+    throw "Another Monitor Tools setup is updating '$InstallDirectory'. Try again after it finishes."
 }
 
-if (-not $keepProfiles) {
-    # Stage beside the destination, then atomically replace and back up existing profiles.
-    $stagedConfig = Join-Path $InstallDirectory ('.profiles-' + [Guid]::NewGuid().ToString('N') + '.tmp')
-    try {
-        [System.IO.File]::WriteAllText($stagedConfig, $configJson)
-        if (Test-Path -LiteralPath $configPath -PathType Leaf) {
-            $backupPath = "$configPath.$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))-$([Guid]::NewGuid().ToString('N')).bak"
-            [System.IO.File]::Replace($stagedConfig, $configPath, $backupPath)
-            Write-Host "Previous profiles backed up to: $backupPath"
+try {
+    $previousConfig = if (Test-Path -LiteralPath $configPath -PathType Leaf) { [IO.File]::ReadAllBytes($configPath) } else { $null }
+    [void][IO.Directory]::CreateDirectory($stagePath)
+    if (Test-Path -LiteralPath $InstallDirectory -PathType Container) {
+        foreach ($existingItem in @(Get-ChildItem -LiteralPath $InstallDirectory -Force)) {
+            Copy-Item -LiteralPath $existingItem.FullName -Destination $stagePath -Recurse -Force
         }
-        else {
-            [System.IO.File]::Move($stagedConfig, $configPath)
+    }
+    $managedPaths = New-Object System.Collections.Generic.List[string]
+    $files = @($requiredFiles | ForEach-Object { Get-Item -LiteralPath (Join-Path $PSScriptRoot $_) })
+    foreach ($name in @('AGENTS.md', 'TESTING-NOTES.md', 'Export-Diagnostics.ps1', 'monitor-compatibility.json',
+            'Setup.exe', 'docs', 'examples', 'tests', 'app')) {
+        $optionalPath = Join-Path $PSScriptRoot $name
+        if (Test-Path -LiteralPath $optionalPath) {
+            if ((Get-Item -LiteralPath $optionalPath) -is [IO.DirectoryInfo]) {
+                $files += @(Get-ChildItem -LiteralPath $optionalPath -File -Recurse)
+            }
+            else { $files += @(Get-Item -LiteralPath $optionalPath) }
+        }
+    }
+    foreach ($file in $files) {
+        $relativePath = $file.FullName.Substring($PSScriptRoot.Length).TrimStart('\', '/')
+        $destination = Join-Path $stagePath $relativePath
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+        Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
+        $managedPaths.Add($relativePath.Replace('\', '/'))
+    }
+    [IO.File]::WriteAllText((Join-Path $stagePath 'config-path.txt'), [IO.Path]::GetFullPath($configPath))
+    $managedPaths.Add('config-path.txt')
+    $manifestFiles = @($managedPaths | Select-Object -Unique | ForEach-Object {
+        $managedFile = Get-Item -LiteralPath (Join-Path $stagePath $_)
+        [ordered]@{
+            path = $_
+            sha256 = Get-Sha256 -Path $managedFile.FullName
+        }
+    })
+    [IO.File]::WriteAllText((Join-Path $stagePath 'install-manifest.json'), ([ordered]@{
+        product = 'Monitor Tools'; version = (Get-Content -LiteralPath (Join-Path $stagePath 'VERSION') -Raw).Trim()
+        installDirectory = [IO.Path]::GetFullPath($InstallDirectory)
+        configPath = [IO.Path]::GetFullPath($configPath)
+        installedAtUtc = [DateTime]::UtcNow.ToString('o'); files = $manifestFiles
+    } | ConvertTo-Json -Depth 5))
+
+    $installedTray = Join-Path $InstallDirectory 'app\MonitorTools.exe'
+    if (Test-Path -LiteralPath $installedTray -PathType Leaf) {
+        foreach ($process in @(Get-Process -Name MonitorTools -ErrorAction SilentlyContinue)) {
+            try {
+                if ([IO.Path]::GetFullPath($process.Path).Equals([IO.Path]::GetFullPath($installedTray), [StringComparison]::OrdinalIgnoreCase)) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                    $process.WaitForExit(5000)
+                }
+            }
+            catch { }
+        }
+    }
+    if (Test-Path -LiteralPath $InstallDirectory) {
+        Move-Item -LiteralPath $InstallDirectory -Destination $rollbackPath
+        $oldMoved = $true
+    }
+    if ($TestFailureBeforeActivation) { throw 'Injected failure before application activation.' }
+    Move-Item -LiteralPath $stagePath -Destination $InstallDirectory
+    $appActivated = $true
+    if ($TestFailureAfterActivation) { throw 'Injected failure after application activation.' }
+
+    [void][IO.Directory]::CreateDirectory($dataDirectory)
+    Save-MonitorToolsConfig -Config ($configJson | ConvertFrom-Json) -Path $configPath | Out-Null
+    if ($null -ne $legacyConfigBytes -and -not $legacyConfigPath.Equals($configPath, [StringComparison]::OrdinalIgnoreCase)) {
+        $legacyBackup = "$configPath.legacy-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')).bak"
+        [IO.File]::WriteAllBytes($legacyBackup, $legacyConfigBytes)
+        Remove-Item -LiteralPath $legacyConfigPath -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not $SkipRegistration -and $installHotkeys -and -not $trayAvailable) {
+        & (Join-Path $InstallDirectory 'Install-ProfileHotkeys.ps1') | Out-Host
+    }
+    elseif (-not $SkipRegistration) {
+        & (Join-Path $InstallDirectory 'Install-ProfileHotkeys.ps1') -Uninstall -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    if (-not $SkipRegistration) {
+        $version = (Get-Content -LiteralPath (Join-Path $InstallDirectory 'VERSION') -Raw).Trim()
+        $powerShellPath = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
+        $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MonitorTools'
+        [void](New-Item -Path $uninstallKey -Force)
+        $uninstallCommand = '"' + $powerShellPath + '" -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $InstallDirectory 'Uninstall.ps1') + '"'
+        $repairCommand = '"' + $powerShellPath + '" -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $InstallDirectory 'Repair.ps1') + '"'
+        foreach ($property in ([ordered]@{
+                DisplayName = 'Monitor Tools'; DisplayVersion = $version; Publisher = 'Monitor Tools'
+                InstallLocation = $InstallDirectory; DisplayIcon = (Join-Path $InstallDirectory 'app\MonitorTools.exe')
+                UninstallString = $uninstallCommand; QuietUninstallString = $uninstallCommand + ' -Quiet'
+                ModifyPath = $repairCommand
+            }).GetEnumerator()) {
+            [void](New-ItemProperty -Path $uninstallKey -Name $property.Key -Value $property.Value -PropertyType String -Force)
+        }
+        [void](New-ItemProperty -Path $uninstallKey -Name NoModify -Value 0 -PropertyType DWord -Force)
+        [void](New-ItemProperty -Path $uninstallKey -Name NoRepair -Value 0 -PropertyType DWord -Force)
+        $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        if ($startTray -and (Test-Path -LiteralPath (Join-Path $InstallDirectory 'app\MonitorTools.exe'))) {
+            [void](New-Item -Path $runKey -Force)
+            [void](New-ItemProperty -Path $runKey -Name MonitorTools -Value ('"' + (Join-Path $InstallDirectory 'app\MonitorTools.exe') + '"') -PropertyType String -Force)
+        }
+        else { Remove-ItemProperty -Path $runKey -Name MonitorTools -ErrorAction SilentlyContinue }
+
+        if (Test-Path -LiteralPath (Join-Path $InstallDirectory 'app\MonitorTools.exe')) {
+            $shortcutDirectory = Join-Path ([Environment]::GetFolderPath('Programs')) 'Monitor Tools'
+            [void][IO.Directory]::CreateDirectory($shortcutDirectory)
+            $shell = New-Object -ComObject WScript.Shell
+            $shortcut = $shell.CreateShortcut((Join-Path $shortcutDirectory 'Monitor Tools.lnk'))
+            $shortcut.TargetPath = Join-Path $InstallDirectory 'app\MonitorTools.exe'
+            $shortcut.WorkingDirectory = $InstallDirectory
+            $shortcut.Description = 'Open Monitor Tools.'
+            $shortcut.Save()
+        }
+    }
+    $installSucceeded = $true
+}
+catch {
+    $failure = $_
+    try {
+        if ($appActivated -and (Test-Path -LiteralPath $InstallDirectory)) { Remove-Item -LiteralPath $InstallDirectory -Recurse -Force }
+        if ($oldMoved -and (Test-Path -LiteralPath $rollbackPath) -and -not (Test-Path -LiteralPath $InstallDirectory)) {
+            Move-Item -LiteralPath $rollbackPath -Destination $InstallDirectory
+        }
+    }
+    catch {
+        throw "Installation failed: $($failure.Exception.Message) Rollback is preserved at '$rollbackPath' because restoration also failed: $($_.Exception.Message)"
+    }
+    if ($null -ne $previousConfig) {
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $configPath))
+        [IO.File]::WriteAllBytes($configPath, $previousConfig)
+    }
+    elseif (Test-Path -LiteralPath $configPath) { Remove-Item -LiteralPath $configPath -Force }
+    throw $failure
+}
+finally {
+    try {
+        foreach ($temporaryPath in @($stagePath)) {
+            if (Test-Path -LiteralPath $temporaryPath) {
+                Assert-SafeSiblingPath $temporaryPath $installParent ('.' + $leaf + '.')
+                Remove-Item -LiteralPath $temporaryPath -Recurse -Force
+            }
+        }
+        if ($installSucceeded -and (Test-Path -LiteralPath $rollbackPath)) {
+            Assert-SafeSiblingPath $rollbackPath $installParent ('.' + $leaf + '.rollback-')
+            Remove-Item -LiteralPath $rollbackPath -Recurse -Force
         }
     }
     finally {
-        if (Test-Path -LiteralPath $stagedConfig) { Remove-Item -LiteralPath $stagedConfig -Force }
+        if ($deploymentLocked) { $deploymentMutex.ReleaseMutex() }
+        $deploymentMutex.Dispose()
     }
 }
 
-Write-Host "`nFiles and profiles saved to: $InstallDirectory"
-if ($installHotkeys) {
-    & (Join-Path $InstallDirectory 'Install-ProfileHotkeys.ps1') | Out-Host
-}
-Write-Host "`nSetup complete. Open README.md in the installed folder for the one-monitor return-path test."
-Write-Host 'Keep the monitor input selector available when testing. Neither direction has been physically verified by setup.'
-Write-Host 'Use This-PC.cmd and Other-PC.cmd in the installed folder. You may delete the original download.'
-if (-not $installHotkeys) {
-    Write-Host 'After testing both directions, run Setup.cmd in the installed folder again, keep the profiles, and choose hotkeys.'
-}
+Write-Host "`nMonitor Tools $((Get-Content -LiteralPath (Join-Path $InstallDirectory 'VERSION') -Raw).Trim()) installed."
+Write-Host "Application: $InstallDirectory"
+Write-Host "Configuration: $configPath"
+Write-Host 'Setup did not physically switch the monitors. Use guided verification before relying on automatic return.'

@@ -1,10 +1,12 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("this-pc", "other-pc")]
+    [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')]
     [string]$Profile,
 
     [string]$ConfigPath,
+    [string]$MonitorId,
+    [switch]$PassThru,
     [switch]$SaveCurrentSettings,
     [string]$LogPath
 )
@@ -12,13 +14,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$commonPath = Join-Path $PSScriptRoot "MonitorTools.Common.ps1"
+if (Test-Path -LiteralPath $commonPath) { . $commonPath }
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
-    $ConfigPath = Join-Path $PSScriptRoot "monitor-profiles.json"
+    if (Get-Command Get-MonitorToolsConfigPath -ErrorAction SilentlyContinue) { $ConfigPath = Get-MonitorToolsConfigPath -Root $PSScriptRoot }
+    else { $ConfigPath = Join-Path $PSScriptRoot "monitor-profiles.json" }
 }
 
 try {
     & (Join-Path $PSScriptRoot "Switch-MonitorInput.ps1") -Profile $Profile `
-        -ConfigPath $ConfigPath -SaveCurrentSettings:$SaveCurrentSettings -WhatIf:$WhatIfPreference
+        -ConfigPath $ConfigPath -MonitorId $MonitorId -PassThru:$PassThru `
+        -SaveCurrentSettings:$SaveCurrentSettings -WhatIf:$WhatIfPreference
 }
 catch {
     $failure = $_

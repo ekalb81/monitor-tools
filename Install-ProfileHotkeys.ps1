@@ -2,6 +2,7 @@
 param(
     [string]$ThisPcHotkey = "CTRL+ALT+1",
     [string]$OtherPcHotkey = "CTRL+ALT+2",
+    [switch]$ForceLegacyHotkeys,
     [switch]$Uninstall
 )
 
@@ -18,6 +19,11 @@ if ($Uninstall) {
         }
     }
     return
+}
+
+$trayPath = Join-Path $scriptRoot 'app\MonitorTools.exe'
+if ((Test-Path -LiteralPath $trayPath -PathType Leaf) -and -not $ForceLegacyHotkeys) {
+    throw 'MonitorTools.exe owns global hotkeys for this installation. Configure hotkeys in the tray app, or use -ForceLegacyHotkeys only when the tray is disabled.'
 }
 
 $powerShellPath = Join-Path ([Environment]::GetFolderPath("System")) "WindowsPowerShell\v1.0\powershell.exe"

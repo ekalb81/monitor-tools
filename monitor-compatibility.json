@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "catalogVersion": "2026-09-17",
+  "notes": "Candidate mappings require a visual round-trip test on each physical monitor. Capability reports are advisory.",
+  "models": [
+    {
+      "manufacturer": "Samsung",
+      "model": "Odyssey G60SD",
+      "modelPatterns": ["G60SD", "S27DG60"],
+      "firmware": "Not recorded; other firmware is unverified",
+      "candidateInputs": {"HDMI (tested G60SD variant)": "0x05", "DisplayPort 1": "0x0F"},
+      "evidence": "TESTING-NOTES.md, Twingo, 2026-09-15: three displays visually switched and returned, individually and as complete profiles.",
+      "limitations": ["Standard HDMI 0x11 accepted without the intended visible switch", "Do not apply this mapping to all Samsung models", "Inactive-link control must be tested for the actual computer and connection"]
+    }
+  ]
+}

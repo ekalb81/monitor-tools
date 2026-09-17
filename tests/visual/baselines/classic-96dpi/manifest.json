@@ -1,0 +1,14 @@
+﻿{
+    "renderProfile":  "classic-96dpi",
+    "fixtures":  [
+                     "setup-default",
+                     "setup-verified",
+                     "setup-failure",
+                     "setup-busy",
+                     "setup-compact",
+                     "setup-scroll",
+                     "editor-default",
+                     "editor-compact",
+                     "editor-edited"
+                 ]
+}

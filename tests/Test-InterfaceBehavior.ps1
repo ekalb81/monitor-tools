@@ -202,7 +202,7 @@ try {
     if ($null -eq $compiler) { throw 'The Windows .NET Framework C# compiler was not found.' }
     $trayLibrary = Join-Path $testRoot 'TrayBehavior.dll'
     $setupLibrary = Join-Path $testRoot 'SetupBehavior.dll'
-    & $compiler /nologo /target:library /optimize+ "/out:$trayLibrary" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll (Join-Path $repoRoot 'app\Tray.cs')
+    & $compiler /nologo /target:library /optimize+ "/out:$trayLibrary" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll (Join-Path $repoRoot 'app\Tray.cs') (Join-Path $repoRoot 'app\WorkerClient.cs')
     if ($LASTEXITCODE -ne 0) { throw 'Could not compile the tray behavior fixture.' }
     & $compiler /nologo /target:library /optimize+ "/out:$setupLibrary" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll (Join-Path $repoRoot 'installer\Setup.cs')
     if ($LASTEXITCODE -ne 0) { throw 'Could not compile the setup behavior fixture.' }

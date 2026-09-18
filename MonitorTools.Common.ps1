@@ -24,6 +24,37 @@ function Get-MonitorToolsConfigPath {
     return Join-Path $Root 'monitor-profiles.json'
 }
 
+function Stop-MonitorToolsProcesses {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory = $true)][string]$Root)
+    # Stop the tray first so it cannot create another worker during deployment.
+    foreach ($name in @('MonitorTools', 'MonitorTools.Worker')) {
+        $expected = [IO.Path]::GetFullPath((Join-Path $Root "app\$name.exe"))
+        foreach ($process in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+            $matchesPath = $false
+            try { $matchesPath = [IO.Path]::GetFullPath($process.Path).Equals($expected, [StringComparison]::OrdinalIgnoreCase) }
+            catch { }
+            if ($matchesPath -and $PSCmdlet.ShouldProcess($expected, 'Stop running application process')) {
+                try {
+                    if (-not $process.HasExited) {
+                        try { $process.Kill() }
+                        catch {
+                            # A process can exit normally after enumeration but before Kill. Suppress only
+                            # that verified race; access-denied and other termination failures must block deployment.
+                            $exitedDuringKill = $false
+                            try { $exitedDuringKill = $process.HasExited } catch { }
+                            if (-not $exitedDuringKill) { throw }
+                        }
+                    }
+                    if (-not $process.WaitForExit(5000)) { throw "Process $($process.Id) did not stop. Close Monitor Tools and try again." }
+                }
+                finally { $process.Dispose() }
+            }
+            else { $process.Dispose() }
+        }
+    }
+}
+
 function Get-MonitorToolsCompatibilityInfo {
     param([string]$Model, [string]$CatalogPath = (Join-Path $PSScriptRoot 'monitor-compatibility.json'))
     $candidates = [ordered]@{}

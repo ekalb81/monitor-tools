@@ -78,9 +78,16 @@ $trayDirectory = Join-Path $payloadRoot 'app'
 $trayExecutable = Join-Path $trayDirectory 'MonitorTools.exe'
 & $compiler /nologo /target:winexe /optimize+ /platform:anycpu "/out:$trayExecutable" `
     /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll `
-    $assemblyInfo $traySource
+    $assemblyInfo $traySource (Join-Path $PSScriptRoot 'app\WorkerClient.cs')
 if ($LASTEXITCODE -ne 0) { throw "Tray compilation failed ($LASTEXITCODE)." }
 if ($null -ne $certificate) { Sign-File $trayExecutable $certificate }
+
+$workerExecutable = Join-Path $trayDirectory 'MonitorTools.Worker.exe'
+$engineSources = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'engine') -Filter '*.cs' -File | ForEach-Object FullName)
+& $compiler /nologo /target:exe /optimize+ /platform:anycpu "/out:$workerExecutable" `
+    /reference:System.Web.Extensions.dll /reference:System.Core.dll $assemblyInfo $engineSources
+if ($LASTEXITCODE -ne 0) { throw "Worker compilation failed ($LASTEXITCODE)." }
+if ($null -ne $certificate) { Sign-File $workerExecutable $certificate }
 
 $names = @(
     'Switch-MonitorInput.ps1', 'Run-Profile.ps1', 'Install-ProfileHotkeys.ps1', 'Install.ps1',
@@ -140,17 +147,21 @@ if ($null -ne $certificate) { Sign-File $executable $certificate }
 
 $publishedTray = Join-Path (Split-Path -Parent $executable) 'MonitorTools.exe'
 Copy-Item -LiteralPath $trayExecutable -Destination $publishedTray -Force
+$publishedWorker = Join-Path (Split-Path -Parent $executable) 'MonitorTools.Worker.exe'
+Copy-Item -LiteralPath $workerExecutable -Destination $publishedWorker -Force
 
 $checksumPath = Join-Path (Split-Path -Parent $executable) 'SHA256SUMS.txt'
 $setupHash = Get-Sha256 -Path $executable
 $trayHash = Get-Sha256 -Path $publishedTray
+$workerHash = Get-Sha256 -Path $publishedWorker
 [IO.File]::WriteAllText($checksumPath,
-    "$setupHash  $([IO.Path]::GetFileName($executable))`r`n$trayHash  $([IO.Path]::GetFileName($publishedTray))`r`n")
+    "$setupHash  $([IO.Path]::GetFileName($executable))`r`n$trayHash  $([IO.Path]::GetFileName($publishedTray))`r`n$workerHash  $([IO.Path]::GetFileName($publishedWorker))`r`n")
 [pscustomobject]@{
     Setup = $executable
     Version = $version
     SHA256 = $setupHash
     Tray = $publishedTray
+    Worker = $publishedWorker
     Signed = ($null -ne $certificate)
     Checksums = $checksumPath
 }

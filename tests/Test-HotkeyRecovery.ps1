@@ -23,7 +23,7 @@ try {
     $executable = Join-Path $resolved 'HotkeyRecoveryTests.exe'
     & $compiler /nologo /target:exe /optimize+ /main:HotkeyRecoveryTests "/out:$executable" `
         /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll `
-        (Join-Path $root 'app\Tray.cs') (Join-Path $PSScriptRoot 'HotkeyRecovery.cs')
+        (Join-Path $root 'app\Tray.cs') (Join-Path $root 'app\WorkerClient.cs') (Join-Path $PSScriptRoot 'HotkeyRecovery.cs')
     if ($LASTEXITCODE -ne 0) { throw 'Hotkey recovery test compilation failed.' }
     & $executable
     if ($LASTEXITCODE -ne 0) { throw "Hotkey recovery tests failed with exit code $LASTEXITCODE." }

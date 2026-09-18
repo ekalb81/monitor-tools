@@ -11,6 +11,7 @@ $dataRoot = "$installedRoot.data"
 [void][IO.Directory]::CreateDirectory((Join-Path $sourceRoot 'app'))
 [IO.File]::WriteAllBytes((Join-Path $sourceRoot 'Setup.exe'), [byte[]](1, 2, 3))
 [IO.File]::WriteAllBytes((Join-Path $sourceRoot 'app\MonitorTools.exe'), [byte[]](4, 5, 6))
+[IO.File]::WriteAllBytes((Join-Path $sourceRoot 'app\MonitorTools.Worker.exe'), [byte[]](7, 8, 9))
 try {
     foreach ($name in @(
             'Install.ps1', 'Setup.cmd', 'Run-Profile.ps1', 'Switch-MonitorInput.ps1',
@@ -50,6 +51,7 @@ if (-not $Uninstall) { Set-Content -LiteralPath (Join-Path $PSScriptRoot 'hotkey
     $originalConfig = Get-Content -LiteralPath $installedConfig -Raw
     Assert-Equal (Test-Path -LiteralPath (Join-Path $installedRoot 'hotkeys-requested.txt')) $false 'Isolated setup creates no shortcuts'
     Assert-Equal (Test-Path -LiteralPath (Join-Path $installedRoot 'Run-Profile.ps1')) $true 'Setup copies runtime files'
+    Assert-Equal (Test-Path -LiteralPath (Join-Path $installedRoot 'app\MonitorTools.Worker.exe')) $true 'Setup copies the compiled control worker'
     Assert-Equal (Test-Path -LiteralPath (Join-Path $installedRoot 'install-manifest.json')) $true 'Setup writes repair manifest'
     Assert-Equal ([IO.File]::ReadAllText((Join-Path $installedRoot 'config-path.txt')).Trim()) $installedConfig 'Setup writes config pointer'
     Assert-Equal (($originalConfig | ConvertFrom-Json).schemaVersion) 2 'Legacy configuration migrates to schema 2'
@@ -142,6 +144,21 @@ if (-not $Uninstall) { Set-Content -LiteralPath (Join-Path $PSScriptRoot 'hotkey
     Assert-Equal (Test-Path -LiteralPath (Join-Path $legacyRoot 'user-note.txt')) $true 'Uninstall preserves unowned files'
     Assert-Equal (Test-Path -LiteralPath $migratedPath) $true 'Uninstall retains configuration by default'
     Assert-Equal (Test-Path -LiteralPath (Join-Path $legacyRoot 'Switch-MonitorInput.ps1')) $false 'Uninstall removes manifest-owned files'
+
+    # Simulate an editor save after setup read the old profiles, before activation.
+    # Modify only the copied setup script in this isolated fixture.
+    $setupSource = [IO.File]::ReadAllText($setup)
+    $marker = '    Stop-MonitorToolsProcesses -Root $InstallDirectory'
+    Assert-Equal ($setupSource.Contains($marker)) $true 'Concurrency injection marker must exist'
+    $concurrentJson = '{"schemaVersion":2,"profiles":{"this-pc":{"center":"0x05"}}}'
+    $injectedSave = '    [IO.File]::WriteAllText($configPath, ''' + $concurrentJson + ''')'
+    [IO.File]::WriteAllText($setup, $setupSource.Replace($marker, ($injectedSave + [Environment]::NewLine + $marker)))
+    $versionBeforeRace = [IO.File]::ReadAllText((Join-Path $installedRoot 'VERSION'))
+    Assert-Throws {
+        & $setup -Unattended -InstallDirectory $installedRoot -PreserveRegistration -SkipRegistration
+    } '*Profiles changed while setup was open*'
+    Assert-Equal ([IO.File]::ReadAllText($installedConfig)) $concurrentJson 'A concurrent profile save survives aborted deployment and rollback'
+    Assert-Equal ([IO.File]::ReadAllText((Join-Path $installedRoot 'VERSION'))) $versionBeforeRace 'Concurrent edit prevents application activation'
 }
 finally {
     $resolved = [IO.Path]::GetFullPath($testRoot)

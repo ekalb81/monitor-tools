@@ -36,23 +36,26 @@ try {
     for ($i = 0; $i -lt 103; $i++) { Write-MonitorToolsOperation -Record @{ operationId = $i; results = @() } -Directory $logs }
     Assert (@(Get-ChildItem -LiteralPath $logs -Filter 'operation-*.json').Count -eq 100) 'Operation log retention'
     Assert ([IO.File]::Exists((Join-Path $logs 'keep-me.json'))) 'Rotation preserves unrelated files'
+    Write-MonitorToolsOperation -Record @{ errors = @('sEnSiTiVe-$sErIaL c:\sEnSiTiVe\dIsPlAy$pAtH') } -Directory $logs
 
     Copy-Item -LiteralPath (Join-Path $repo 'Export-Diagnostics.ps1') -Destination $root
     Copy-Item -LiteralPath (Join-Path $repo 'MonitorTools.Common.ps1') -Destination $root
     @'
 param([switch]$List, [switch]$PassThru, [switch]$IncludeCapabilities)
-[pscustomobject]@{ StableId = 'id-aabbccdd'; Model = 'Test Display'; Serial = 'sensitive-serial'; DevicePath = 'sensitive-path'; Capabilities = if ($IncludeCapabilities) { 'vcp(60(05 0F))' } else { $null } }
+[pscustomobject]@{ StableId = 'id-aabbccdd'; Model = 'Test Display'; Serial = 'Sensitive-$Serial'; DevicePath = 'C:\Sensitive\Display$Path'; Capabilities = if ($IncludeCapabilities) { 'vcp(60(05 0F))' } else { $null } }
 '@ | Set-Content -LiteralPath (Join-Path $root 'Switch-MonitorInput.ps1')
     $report = Join-Path $root 'report.json'
     & (Join-Path $root 'Export-Diagnostics.ps1') -OutputPath $report -LogDirectory $logs | Out-Null
     $raw = [IO.File]::ReadAllText($report)
-    Assert (-not $raw.Contains('sensitive-serial') -and -not $raw.Contains('sensitive-path') -and -not $raw.Contains('id-aabbccdd')) 'Export redacts device identifiers'
+    Assert ($raw.IndexOf('sensitive-$serial', [StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+        $raw.IndexOf('c:\sensitive\display$path', [StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+        -not $raw.Contains('id-aabbccdd')) 'Export redacts differently-cased literal device identifiers'
     $diagnostic = $raw | ConvertFrom-Json
     Assert ($diagnostic.configuration.profiles.'split-desk'.'monitor-1' -eq 'displayport1') 'Anonymous profile mapping stays correlated'
     Assert (-not $diagnostic.capabilitiesRequested) 'Capabilities are opt-in'
     & (Join-Path $root 'Export-Diagnostics.ps1') -OutputPath $report -LogDirectory $logs -IncludeCapabilities -IncludeIdentifiers | Out-Null
     $raw = [IO.File]::ReadAllText($report)
-    Assert ($raw.Contains('sensitive-serial') -and $raw.Contains('vcp(60')) 'Explicit diagnostics includes requested hardware detail'
+    Assert ($raw.Contains('Sensitive-$Serial') -and $raw.Contains('vcp(60')) 'Explicit diagnostics includes requested hardware detail'
     Write-Output 'PASS: shared configuration, atomic backups, schema validation, log retention, and diagnostics privacy'
 }
 finally {

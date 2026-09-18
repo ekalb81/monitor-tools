@@ -19,6 +19,8 @@ Requirements: Windows PowerShell 5.1 and .NET Framework 4.5 or later (included o
 
 The tray menu provides saved profiles and individual monitor controls. The profile editor supports custom names, hotkeys, and leaving selected monitors unchanged. Hotkeys are registered by the running tray app; registration conflicts are reported. Optional login startup keeps them available after signing in.
 
+The tray keeps a compiled C# control worker running for your session. Profile switches no longer start PowerShell or compile interop code. Requests share a queue, with switches ahead of waiting background scans; repeated rescans are combined. Saving profiles and exporting diagnostics leave the tray responsive. A native call already in progress must finish or time out before another hardware command can run.
+
 For a three-monitor desk, useful profiles include:
 
 | Profile | Left | Center | Right |
@@ -100,6 +102,7 @@ See [configuration reference](docs/CONFIGURATION.md) for schema 2, partial profi
 | Only some monitors changed | Inspect per-monitor results and retry the selected monitor once its cause is corrected. |
 | Shortcut does nothing | Keep the tray app running, check shortcut conflicts, and verify which computer receives the keyboard. |
 | Unsupported brightness or volume | Omit that scene setting; input switching can still be used independently. |
+| Worker stopped or operation timed out | Check which inputs are showing before requesting another switch. Unanswered switches are not automatically replayed; pending switches are canceled. The worker is recreated for a subsequent request. |
 
 Export a read-only report from the tray or command line:
 
@@ -119,7 +122,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-AllTests.ps1 -In
 pwsh -NoProfile -File .\tests\Run-AllTests.ps1
 ```
 
-The build produces `dist\Setup.exe` and the tray executable. Tests use mock monitor calls and isolated installation files, never real input changes. `Setup.exe --verify-package` checks extraction without discovery; `Setup.exe --render-preview <absolute-png-path>` renders sample setup UI.
+The build produces `dist\Setup.exe`, `dist\MonitorTools.exe`, and `dist\MonitorTools.Worker.exe`. Use the installer to deploy the complete application. Tests use mock monitor calls and isolated installation files, never real input changes. Worker tests cover input/scene validation, queue priority, crash recovery, configuration backups, privacy, and process lifetime. Topology tests verify native structure layouts in both x86 and x64. `Setup.exe --verify-package` checks extraction without discovery; `Setup.exe --render-preview <absolute-png-path>` renders sample setup UI.
+
+See [worker architecture](docs/WORKER-ARCHITECTURE.md) for the control protocol, backend boundary, and performance measurement limits. The PowerShell command-line and setup calibration paths remain supported.
 
 **Visual integration tests run automatically in CI** and with `-IncludeExecutable`. Nine screenshot baselines cover setup states, scrolling, compact windows, and editing/saving a profile. They check real compiled WinForms controls with synthetic data, without switching your monitors. Run just these tests with `powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Visual.ps1` after building. Open `build/visual-tests/index.html` for results; CI retains screenshots and highlighted differences on failure. See [visual test instructions](tests/visual/README.md) for coverage, rendering limits, and deliberate baseline updates.
 

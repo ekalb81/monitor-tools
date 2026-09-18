@@ -165,6 +165,8 @@ if (-not $PreserveRegistration) {
 $existingConfigPath = if (Test-Path -LiteralPath $configPath -PathType Leaf) { $configPath }
 elseif (Test-Path -LiteralPath $legacyConfigPath -PathType Leaf) { $legacyConfigPath }
 else { $null }
+$observedConfigPath = if ($null -ne $existingConfigPath) { $existingConfigPath } else { $configPath }
+$observedConfigBytes = if ([IO.File]::Exists($observedConfigPath)) { [IO.File]::ReadAllBytes($observedConfigPath) } else { $null }
 $keepProfiles = $false
 if ($Unattended -and [string]::IsNullOrWhiteSpace($ConfigurationFile)) {
     if ($null -eq $existingConfigPath) { throw 'Unattended setup requires ConfigurationFile for a new installation.' }
@@ -195,6 +197,9 @@ else {
 }
 
 $trayAvailable = Test-Path -LiteralPath (Join-Path $PSScriptRoot 'app\MonitorTools.exe') -PathType Leaf
+if ($trayAvailable -and -not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'app\MonitorTools.Worker.exe') -PathType Leaf)) {
+    throw 'Setup is missing app\MonitorTools.Worker.exe. Download the complete setup package.'
+}
 $installHotkeys = if ($PreserveRegistration) {
     ($configJson | ConvertFrom-Json).PSObject.Properties['hotkeys'] -ne $null
 } elseif ($Unattended) { $EnableHotkeys.IsPresent } else {
@@ -243,6 +248,9 @@ $appActivated = $false
 $oldMoved = $false
 $installSucceeded = $false
 $previousConfig = $null
+$configurationMutex = $null
+$configurationLocked = $false
+$configurationWriteStarted = $false
 $deploymentMutex = [Threading.Mutex]::new($false, (Get-DeploymentMutexName -Path $InstallDirectory))
 $deploymentLocked = $false
 try { $deploymentLocked = $deploymentMutex.WaitOne($DeploymentMutexWaitSeconds * 1000) }
@@ -253,7 +261,6 @@ if (-not $deploymentLocked) {
 }
 
 try {
-    $previousConfig = if (Test-Path -LiteralPath $configPath -PathType Leaf) { [IO.File]::ReadAllBytes($configPath) } else { $null }
     [void][IO.Directory]::CreateDirectory($stagePath)
     if (Test-Path -LiteralPath $InstallDirectory -PathType Container) {
         foreach ($existingItem in @(Get-ChildItem -LiteralPath $InstallDirectory -Force)) {
@@ -295,18 +302,25 @@ try {
         installedAtUtc = [DateTime]::UtcNow.ToString('o'); files = $manifestFiles
     } | ConvertTo-Json -Depth 5))
 
-    $installedTray = Join-Path $InstallDirectory 'app\MonitorTools.exe'
-    if (Test-Path -LiteralPath $installedTray -PathType Leaf) {
-        foreach ($process in @(Get-Process -Name MonitorTools -ErrorAction SilentlyContinue)) {
-            try {
-                if ([IO.Path]::GetFullPath($process.Path).Equals([IO.Path]::GetFullPath($installedTray), [StringComparison]::OrdinalIgnoreCase)) {
-                    Stop-Process -Id $process.Id -Force -ErrorAction Stop
-                    $process.WaitForExit(5000)
-                }
-            }
-            catch { }
-        }
+    Stop-MonitorToolsProcesses -Root $InstallDirectory
+    # Serialize deployment with editor/script saves and reject choices based on stale profiles.
+    $configurationHash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $configurationKey = [BitConverter]::ToString($configurationHash.ComputeHash(
+            [Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($configPath).ToUpperInvariant()))).Replace('-', '')
     }
+    finally { $configurationHash.Dispose() }
+    $configurationMutex = [Threading.Mutex]::new($false, ('Local\MonitorTools.Config.' + $configurationKey))
+    try { $configurationLocked = $configurationMutex.WaitOne(5000) }
+    catch [Threading.AbandonedMutexException] { $configurationLocked = $true }
+    if (-not $configurationLocked) { throw 'Another process is saving profiles. Run setup again after it completes.' }
+    $currentConfigBytes = if ([IO.File]::Exists($observedConfigPath)) { [IO.File]::ReadAllBytes($observedConfigPath) } else { $null }
+    $configurationChanged = ($null -eq $observedConfigBytes) -ne ($null -eq $currentConfigBytes)
+    if (-not $configurationChanged -and $null -ne $observedConfigBytes) {
+        $configurationChanged = [Convert]::ToBase64String($observedConfigBytes) -cne [Convert]::ToBase64String($currentConfigBytes)
+    }
+    if ($configurationChanged) { throw 'Profiles changed while setup was open. Run setup again to use the latest settings.' }
+    $previousConfig = if ([IO.File]::Exists($configPath)) { [IO.File]::ReadAllBytes($configPath) } else { $null }
     if (Test-Path -LiteralPath $InstallDirectory) {
         Move-Item -LiteralPath $InstallDirectory -Destination $rollbackPath
         $oldMoved = $true
@@ -317,6 +331,7 @@ try {
     if ($TestFailureAfterActivation) { throw 'Injected failure after application activation.' }
 
     [void][IO.Directory]::CreateDirectory($dataDirectory)
+    $configurationWriteStarted = $true
     Save-MonitorToolsConfig -Config ($configJson | ConvertFrom-Json) -Path $configPath | Out-Null
     if ($null -ne $legacyConfigBytes -and -not $legacyConfigPath.Equals($configPath, [StringComparison]::OrdinalIgnoreCase)) {
         $legacyBackup = "$configPath.legacy-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')).bak"
@@ -379,11 +394,11 @@ catch {
     catch {
         throw "Installation failed: $($failure.Exception.Message) Rollback is preserved at '$rollbackPath' because restoration also failed: $($_.Exception.Message)"
     }
-    if ($null -ne $previousConfig) {
+    if ($configurationWriteStarted -and $null -ne $previousConfig) {
         [void][IO.Directory]::CreateDirectory((Split-Path -Parent $configPath))
         [IO.File]::WriteAllBytes($configPath, $previousConfig)
     }
-    elseif (Test-Path -LiteralPath $configPath) { Remove-Item -LiteralPath $configPath -Force }
+    elseif ($configurationWriteStarted -and (Test-Path -LiteralPath $configPath)) { Remove-Item -LiteralPath $configPath -Force }
     throw $failure
 }
 finally {
@@ -400,6 +415,8 @@ finally {
         }
     }
     finally {
+        if ($configurationLocked) { $configurationMutex.ReleaseMutex() }
+        if ($null -ne $configurationMutex) { $configurationMutex.Dispose() }
         if ($deploymentLocked) { $deploymentMutex.ReleaseMutex() }
         $deploymentMutex.Dispose()
     }

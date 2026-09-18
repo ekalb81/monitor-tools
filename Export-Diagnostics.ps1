@@ -61,7 +61,11 @@ function Protect-DiagnosticValue {
     if ($null -eq $Value) { return $null }
     if ($Value -is [string]) {
         $textValue = $Value
-        foreach ($secret in $privateValues) { $textValue = $textValue.Replace($secret, '[redacted]') }
+        $redact = [Text.RegularExpressions.MatchEvaluator]{ param($match) return '[redacted]' }
+        $redactionOptions = [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::CultureInvariant
+        foreach ($secret in @($privateValues | Sort-Object Length -Descending)) {
+            $textValue = [regex]::Replace($textValue, [regex]::Escape($secret), $redact, $redactionOptions)
+        }
         foreach ($match in [regex]::Matches($textValue, '(?i)id-[a-f0-9]{8,64}')) {
             $key = $match.Value.ToLowerInvariant()
             if (-not $aliases.ContainsKey($key)) { $aliases[$key] = 'monitor-' + ($aliases.Count + 1) }

@@ -77,13 +77,7 @@ try {
         throw 'The installation changed while uninstall was waiting. Run uninstall again.'
     }
     if ($PSCmdlet.ShouldProcess($installDirectory, 'Uninstall Monitor Tools')) {
-    Get-Process -Name MonitorTools -ErrorAction SilentlyContinue | Where-Object {
-        try {
-            $processPath = [IO.Path]::GetFullPath($_.Path)
-            $processPath.StartsWith($installDirectory.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)
-        }
-        catch { $false }
-    } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Stop-MonitorToolsProcesses -Root $installDirectory
     if (-not $SkipRegistration) {
         & (Join-Path $installDirectory 'Install-ProfileHotkeys.ps1') -Uninstall -ErrorAction SilentlyContinue | Out-Null
         $shortcutDirectory = Join-Path ([Environment]::GetFolderPath('Programs')) 'Monitor Tools'

@@ -2,6 +2,14 @@
 
 This file captures the important observed behaviors from interactive testing so they are not lost.
 
+## Compiled worker checks (September 17, 2026)
+
+The tray now uses a persistent C# worker for profile switching and discovery. Automated tests cover both engines, complete-plan validation, partial results, bounded retries, worker priority/coalescing, timeout and crash recovery without replay, UTF-8 process transport, configuration backups, diagnostics redaction, and x86/x64 topology structure layouts. The Windows PowerShell 5.1 executable suite, including all nine visual fixtures, passed. PowerShell 7 runs the script compatibility suites.
+
+Read-only checks on Twingo found the same three stable monitor IDs in the compiled worker and PowerShell engine. Active topology maps the left monitor to AMD graphics, and the center/right monitors to NVIDIA graphics. No input, brightness, or volume writes were performed. Existing calibration records and the earlier visible switching observations remain the physical evidence; the compiled switching path still needs a user-observed desk test.
+
+Local timing used the built worker over redirected pipes, with two warm-up requests followed by ten samples per action. Warm `ping` round trips had a **0.34 ms** median; lightweight inventory of the three real monitors had a **2.78 ms** median (2.50–4.13 ms). The first ping including process startup took **100.88 ms**. These measurements include the PowerShell benchmark caller's serialization and response parsing, and logging for inventory. They do not measure a visible monitor switch or imply a firmware speedup. Native handles and identity information are reacquired per operation; no cross-operation identity cache is needed for this measured inventory cost.
+
 ## Version 2 implementation checks: 2026-09-17
 
 Read-only discovery on Twingo identified all three monitors as **Odyssey G60SD**, with distinct `edid-serial` identities for left, center, and right. No input, brightness, or volume writes were performed during this implementation session. This confirms identity discovery on the current connections; it does not establish persistence across cable changes or another graphics driver.

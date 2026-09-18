@@ -42,7 +42,7 @@ internal static class Program
             }
             foreach (string required in new[] { "Install.ps1", "Run-Profile.ps1", "Switch-MonitorInput.ps1", "Detect-Monitors.ps1", "README.md",
                 "MonitorTools.Common.ps1", "Export-Diagnostics.ps1", "Repair.ps1", "Uninstall.ps1", "VERSION", "monitor-compatibility.json",
-                Path.Combine("app", "MonitorTools.exe"), Path.Combine("app", "Invoke-TrayCommand.ps1") })
+                Path.Combine("app", "MonitorTools.exe"), Path.Combine("app", "MonitorTools.Worker.exe"), Path.Combine("app", "Invoke-TrayCommand.ps1") })
                 if (!File.Exists(Path.Combine(staging, required))) throw new InvalidDataException("Missing " + required);
             if (verify) return 0;
             File.Copy(Assembly.GetExecutingAssembly().Location, Path.Combine(staging, "Setup.exe"), true);

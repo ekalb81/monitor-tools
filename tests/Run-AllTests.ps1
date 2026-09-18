@@ -4,10 +4,11 @@ param([switch]$IncludeExecutable)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $hostExecutable = (Get-Process -Id $PID).Path
-$suites = @('Run-Tests.ps1', 'Test-Engine.ps1', 'Test-Common.ps1')
+$suites = @('Run-Tests.ps1', 'Test-Engine.ps1', 'Test-Common.ps1', 'WorkerLifecycleTests.ps1')
 if ($IncludeExecutable) {
     if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Executable reflection tests require Windows PowerShell 5.1.' }
-    $suites += @('Test-Interface.ps1', 'Test-InterfaceBehavior.ps1', 'Test-HotkeyRecovery.ps1', 'Test-Executable.ps1', 'Test-Package.ps1', 'Test-Visual.ps1')
+    $suites += @('Test-CompiledEngine.ps1', 'Test-Topology.ps1', 'Test-WorkerClient.ps1', 'Test-WorkerService.ps1',
+        'Test-Interface.ps1', 'Test-InterfaceBehavior.ps1', 'Test-HotkeyRecovery.ps1', 'Test-Executable.ps1', 'Test-Package.ps1', 'Test-Visual.ps1')
 }
 $testLogs = Join-Path ([IO.Path]::GetTempPath()) ('monitor-tools-suite-' + [Guid]::NewGuid().ToString('N'))
 $previousLogs = $env:MONITOR_TOOLS_LOG_DIRECTORY

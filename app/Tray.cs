@@ -39,6 +39,7 @@ internal sealed class TrayApplication : ApplicationContext
     private readonly HotkeyWindow hotkeys = new HotkeyWindow();
     private readonly Control dispatcher = new Control();
     private readonly System.Windows.Forms.Timer rescanTimer = new System.Windows.Forms.Timer();
+    private readonly WorkerClient worker;
     private Dictionary<string, object> config = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
     private List<Dictionary<string, object>> inventory = new List<Dictionary<string, object>>();
     private string configPath;
@@ -46,10 +47,17 @@ internal sealed class TrayApplication : ApplicationContext
     private bool commandRunning;
     private string pendingProfile;
     private string pendingMonitorId;
+    private bool scanRunning;
+    private bool scanPending;
+    private bool scanNotifyPending;
+    private bool exiting;
+    private bool settingsRunning;
+    private bool diagnosticsRunning;
 
     internal TrayApplication()
     {
         dispatcher.CreateControl();
+        worker = new WorkerClient(root);
         configPath = ResolveConfigPath();
         icon.Icon = SystemIcons.Application;
         icon.Text = "Monitor Tools";
@@ -191,7 +199,7 @@ internal sealed class TrayApplication : ApplicationContext
             string name = profile.Key;
             ToolStripMenuItem item = new ToolStripMenuItem(ProfileDisplayName(name));
             item.Click += delegate { RunProfile(name, null); };
-            item.Enabled = !commandRunning;
+            item.Enabled = !settingsRunning;
             menu.Items.Add(item);
         }
         menu.Items.Add(new ToolStripSeparator());
@@ -208,27 +216,27 @@ internal sealed class TrayApplication : ApplicationContext
                 string capturedId = stableId;
                 ToolStripMenuItem profileItem = new ToolStripMenuItem(ProfileDisplayName(capturedProfile));
                 profileItem.Click += delegate { RunProfile(capturedProfile, capturedId); };
-                profileItem.Enabled = !commandRunning;
+                profileItem.Enabled = !settingsRunning;
                 monitorMenu.DropDownItems.Add(profileItem);
             }
             monitorsMenu.DropDownItems.Add(monitorMenu);
         }
-        monitorsMenu.Enabled = monitorsMenu.DropDownItems.Count > 0 && !commandRunning;
+        monitorsMenu.Enabled = monitorsMenu.DropDownItems.Count > 0 && !settingsRunning;
         menu.Items.Add(monitorsMenu);
         menu.Items.Add(new ToolStripSeparator());
         ToolStripMenuItem recentItem = new ToolStripMenuItem("Recent: " + Truncate(recent, 90)) { Enabled = false };
         menu.Items.Add(recentItem);
         ToolStripMenuItem refresh = new ToolStripMenuItem("Rescan displays");
         refresh.Click += delegate { RefreshInventory(true); };
-        refresh.Enabled = !commandRunning;
+        refresh.Enabled = true;
         menu.Items.Add(refresh);
         ToolStripMenuItem editor = new ToolStripMenuItem("Edit profiles and hotkeys...");
         editor.Click += delegate { ShowEditor(); };
-        editor.Enabled = !commandRunning;
+        editor.Enabled = !commandRunning && !settingsRunning;
         menu.Items.Add(editor);
         ToolStripMenuItem diagnostics = new ToolStripMenuItem("Export diagnostics...");
         diagnostics.Click += delegate { ExportDiagnostics(); };
-        diagnostics.Enabled = !commandRunning;
+        diagnostics.Enabled = !diagnosticsRunning;
         menu.Items.Add(diagnostics);
         menu.Items.Add(new ToolStripSeparator());
         ToolStripMenuItem exit = new ToolStripMenuItem("Exit");
@@ -257,6 +265,13 @@ internal sealed class TrayApplication : ApplicationContext
 
     private async void RunProfile(string profile, string monitorId)
     {
+        if (exiting) return;
+        if (settingsRunning)
+        {
+            pendingProfile = profile; pendingMonitorId = monitorId;
+            recent = "Queued " + ProfileDisplayName(profile) + "; it will run after profiles are saved.";
+            BuildMenu(); return;
+        }
         if (commandRunning)
         {
             pendingProfile = profile; pendingMonitorId = monitorId;
@@ -264,6 +279,7 @@ internal sealed class TrayApplication : ApplicationContext
             BuildMenu(); return;
         }
         commandRunning = true;
+        bool refreshAfter = false;
         recent = "Switching " + ProfileDisplayName(profile) + (monitorId == null ? "" : " on " + MonitorLabel(monitorId)) + "...";
         BuildMenu();
         try
@@ -272,35 +288,55 @@ internal sealed class TrayApplication : ApplicationContext
             request["action"] = "profile";
             request["profile"] = profile;
             if (monitorId != null) request["monitorId"] = monitorId;
-            string output = await Task.Run(delegate { return Invoke(request, 120000); });
+            string output = await worker.InvokeAsync(request, 120000);
+            if (exiting) return;
+            refreshAfter = true;
             recent = "Completed " + ProfileDisplayName(profile) + ": " + Truncate(output, 180);
             icon.ShowBalloonTip(3500, "Monitor Tools", "Profile completed. Open the tray menu for details.", ToolTipIcon.Info);
         }
         catch (Exception error)
         {
-            recent = "Failed: " + error.Message;
+            if (exiting) return;
+            WorkerRequestException workerError = error as WorkerRequestException;
+            refreshAfter = workerError != null;
+            pendingProfile = null; pendingMonitorId = null;
+            recent = "Failed: " + error.Message + (workerError != null && !String.IsNullOrWhiteSpace(workerError.Payload)
+                ? " Results: " + Truncate(workerError.Payload, 180) : "");
             icon.ShowBalloonTip(6000, "Monitor Tools", Truncate(recent, 240), ToolTipIcon.Error);
         }
         finally
         {
-            commandRunning = false; BuildMenu();
-            if (pendingProfile != null)
+            commandRunning = false;
+            if (!exiting)
             {
-                string nextProfile = pendingProfile, nextMonitor = pendingMonitorId;
-                pendingProfile = null; pendingMonitorId = null;
-                RunProfile(nextProfile, nextMonitor);
+                BuildMenu();
+                if (pendingProfile != null)
+                {
+                    string nextProfile = pendingProfile, nextMonitor = pendingMonitorId;
+                    pendingProfile = null; pendingMonitorId = null;
+                    RunProfile(nextProfile, nextMonitor);
+                }
+                if (refreshAfter) QueueInventoryRefresh(false);
             }
         }
     }
 
     private async void RefreshInventory(bool notify)
     {
-        if (commandRunning) return;
+        if (exiting) return;
+        if (scanRunning)
+        {
+            scanPending = true;
+            scanNotifyPending = scanNotifyPending || notify;
+            return;
+        }
+        scanRunning = true;
         try
         {
             Dictionary<string, object> request = new Dictionary<string, object>();
             request["action"] = "list";
-            string output = await Task.Run(delegate { return Invoke(request, 60000); });
+            string output = await worker.InvokeAsync(request, 60000);
+            if (exiting) return;
             inventory = DeserializeRows(output);
             if (notify)
             {
@@ -311,10 +347,32 @@ internal sealed class TrayApplication : ApplicationContext
         }
         catch (Exception error)
         {
+            if (exiting) return;
             recent = "Rescan failed: " + error.Message;
             BuildMenu();
             if (notify) icon.ShowBalloonTip(5000, "Monitor Tools", Truncate(recent, 240), ToolTipIcon.Warning);
         }
+        finally
+        {
+            scanRunning = false;
+            if (!exiting && scanPending)
+            {
+                bool notifyNext = scanNotifyPending;
+                scanPending = false; scanNotifyPending = false;
+                RefreshInventory(notifyNext);
+            }
+        }
+    }
+
+    private void QueueInventoryRefresh(bool notify)
+    {
+        if (exiting) return;
+        if (scanRunning)
+        {
+            scanPending = true;
+            scanNotifyPending = scanNotifyPending || notify;
+        }
+        else RefreshInventory(notify);
     }
 
     private List<Dictionary<string, object>> DeserializeRows(string output)
@@ -325,33 +383,55 @@ internal sealed class TrayApplication : ApplicationContext
         return one == null ? new List<Dictionary<string, object>>() : new List<Dictionary<string, object>> { one };
     }
 
-    private void ShowEditor()
+    private async void ShowEditor()
     {
+        if (exiting || settingsRunning) return;
         using (ProfileEditor editor = new ProfileEditor(config, MonitorLabel, HotkeyMap()))
         {
             if (editor.ShowDialog() != DialogResult.OK) return;
+            settingsRunning = true; BuildMenu();
+            bool saved = false;
             try
             {
                 Dictionary<string, object> request = new Dictionary<string, object>();
                 request["action"] = "saveConfig";
                 request["config"] = editor.Result;
-                Invoke(request, 30000);
+                await worker.InvokeAsync(request, 30000);
+                if (exiting) return;
+                saved = true;
                 LoadConfig();
                 recent = "Profiles and hotkeys saved.";
                 BuildMenu();
             }
-            catch (Exception error) { MessageBox.Show(error.Message, "Monitor Tools", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+            catch (Exception error) { if (!exiting) MessageBox.Show(error.Message, "Monitor Tools", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+            finally
+            {
+                settingsRunning = false;
+                if (!exiting)
+                {
+                    BuildMenu();
+                    if (!saved) { pendingProfile = null; pendingMonitorId = null; }
+                    else if (pendingProfile != null)
+                    {
+                        string nextProfile = pendingProfile, nextMonitor = pendingMonitorId;
+                        pendingProfile = null; pendingMonitorId = null;
+                        RunProfile(nextProfile, nextMonitor);
+                    }
+                }
+            }
         }
     }
 
-    private void ExportDiagnostics()
+    private async void ExportDiagnostics()
     {
+        if (exiting || diagnosticsRunning) return;
         using (SaveFileDialog dialog = new SaveFileDialog())
         {
             dialog.Title = "Export Monitor Tools diagnostics";
             dialog.Filter = "JSON document (*.json)|*.json";
             dialog.FileName = "monitor-tools-diagnostics-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".json";
             if (dialog.ShowDialog() != DialogResult.OK) return;
+            diagnosticsRunning = true; BuildMenu();
             try
             {
                 bool includeCapabilities = MessageBox.Show("Include a slower DDC/CI capabilities query? Monitor capability reports can be inaccurate.", "Diagnostics detail", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
@@ -359,59 +439,33 @@ internal sealed class TrayApplication : ApplicationContext
                 request["action"] = "diagnostics";
                 request["outputPath"] = dialog.FileName;
                 request["includeCapabilities"] = includeCapabilities;
-                Invoke(request, 120000);
+                await worker.InvokeAsync(request, 120000);
+                if (exiting) return;
                 recent = "Diagnostics saved to " + dialog.FileName;
                 BuildMenu();
             }
-            catch (Exception error) { MessageBox.Show(error.Message, "Monitor Tools", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+            catch (Exception error) { if (!exiting) MessageBox.Show(error.Message, "Monitor Tools", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+            finally { diagnosticsRunning = false; if (!exiting) BuildMenu(); }
         }
     }
-
-    private string Invoke(Dictionary<string, object> request, int timeout)
-    {
-        string requestPath = Path.Combine(Path.GetTempPath(), "monitor-tools-request-" + Guid.NewGuid().ToString("N") + ".json");
-        File.WriteAllText(requestPath, json.Serialize(request), new UTF8Encoding(false));
-        string executable = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
-        string script = Path.Combine(root, "app", "Invoke-TrayCommand.ps1");
-        ProcessStartInfo start = new ProcessStartInfo(executable,
-            "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + Quote(script) + " -RequestPath " + Quote(requestPath));
-        start.UseShellExecute = false;
-        start.CreateNoWindow = true;
-        start.RedirectStandardOutput = true;
-        start.RedirectStandardError = true;
-        start.StandardOutputEncoding = Encoding.UTF8;
-        start.WorkingDirectory = root;
-        using (Process process = Process.Start(start))
-        {
-            Task<string> output = process.StandardOutput.ReadToEndAsync();
-            Task<string> error = process.StandardError.ReadToEndAsync();
-            if (!process.WaitForExit(timeout))
-            {
-                try { process.Kill(); } catch { }
-                throw new TimeoutException("The monitor operation timed out.");
-            }
-            Task.WaitAll(output, error);
-            if (process.ExitCode != 0) throw new InvalidOperationException((error.Result + "\n" + output.Result).Trim());
-            return output.Result.Trim();
-        }
-    }
-
-    private static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
 
     private void DisplayChanged(object sender, EventArgs e) { ScheduleRescan(); }
     private void PowerChanged(object sender, PowerModeChangedEventArgs e) { if (e.Mode == PowerModes.Resume) ScheduleRescan(); }
     private void ScheduleRescan()
     {
-        if (dispatcher.IsDisposed) return;
+        if (exiting || dispatcher.IsDisposed) return;
         if (dispatcher.InvokeRequired) { dispatcher.BeginInvoke(new Action(ScheduleRescan)); return; }
         rescanTimer.Stop(); rescanTimer.Start();
     }
 
     protected override void ExitThreadCore()
     {
+        exiting = true;
+        pendingProfile = null; pendingMonitorId = null; scanPending = false;
         SystemEvents.DisplaySettingsChanged -= DisplayChanged;
         SystemEvents.PowerModeChanged -= PowerChanged;
         rescanTimer.Dispose();
+        worker.Dispose();
         hotkeys.Dispose();
         dispatcher.Dispose();
         icon.Visible = false;

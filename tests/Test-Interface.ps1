@@ -21,7 +21,7 @@ try {
     $trayOutput = Join-Path $testRoot 'MonitorTools.exe'
     & $compiler /nologo /target:winexe /optimize+ /platform:anycpu "/out:$trayOutput" `
         /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll `
-        (Join-Path $RepoRoot 'app\Tray.cs')
+        (Join-Path $RepoRoot 'app\Tray.cs') (Join-Path $RepoRoot 'app\WorkerClient.cs')
     if ($LASTEXITCODE -ne 0) { throw "Tray compilation failed ($LASTEXITCODE)." }
     Assert-True (Test-Path -LiteralPath $trayOutput -PathType Leaf) 'Tray executable was not produced.'
     $trayAssembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($trayOutput))

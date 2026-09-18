@@ -86,6 +86,8 @@ Use **Monitor Tools** in Windows Installed Apps to repair or uninstall. Configur
 
 The standalone `Install-ProfileHotkeys.ps1` still supports legacy shortcut hotkeys. Avoid registering the same keys in both shortcuts and the tray app. Remove those shortcuts with `Install-ProfileHotkeys.ps1 -Uninstall` before using tray hotkeys.
 
+During upgrades, setup clears the old shortcut bindings and notifies Windows before the tray takes ownership. The tray retries temporary registration conflicts before warning. If a conflict persists, close the app that owns those keys or change them in **Profiles and hotkeys**, then save to retry registration. A hotkey conflict does not erase input choices or completed calibration.
+
 See [configuration reference](docs/CONFIGURATION.md) for schema 2, partial profiles, brightness/volume scenes, and diagnostic privacy. Scene controls must be supported by the monitor; HDR or monitor-specific modes can affect their behavior.
 
 ## Troubleshooting

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -55,6 +56,7 @@ internal sealed class TrayApplication : ApplicationContext
         icon.Visible = true;
         icon.DoubleClick += delegate { ShowEditor(); };
         hotkeys.Pressed += delegate(string profile) { RunProfile(profile, null); };
+        hotkeys.RegistrationFailed += HotkeyRegistrationFailed;
         rescanTimer.Interval = 1500;
         rescanTimer.Tick += delegate { rescanTimer.Stop(); RefreshInventory(false); };
         SystemEvents.DisplaySettingsChanged += DisplayChanged;
@@ -133,12 +135,30 @@ internal sealed class TrayApplication : ApplicationContext
 
     private void RegisterHotkeys()
     {
-        List<string> conflicts = hotkeys.Replace(HotkeyMap());
-        if (conflicts.Count > 0)
+        hotkeys.Replace(HotkeyMap());
+    }
+
+    private void HotkeyRegistrationFailed(List<HotkeyFailure> failures)
+    {
+        List<string> details = new List<string>();
+        foreach (HotkeyFailure failure in failures)
         {
-            recent = "Hotkey unavailable: " + String.Join(", ", conflicts.ToArray());
-            icon.ShowBalloonTip(5000, "Monitor Tools hotkey conflict", recent, ToolTipIcon.Warning);
+            if (failure.Invalid) details.Add(failure.Hotkey + " (invalid)");
+            else
+            {
+                string attempts = failure.Attempts == 1 ? "1 attempt" : failure.Attempts + " attempts";
+                details.Add(failure.Hotkey + " (Win32 " + failure.NativeError + ": " +
+                    new Win32Exception(failure.NativeError).Message + "; " + attempts + ")");
+            }
         }
+        recent = "Hotkey unavailable: " + String.Join(", ", details.ToArray()) +
+            ". Close the app holding the key and restart Monitor Tools, or edit the hotkey from the tray menu.";
+        string keys = Truncate(String.Join(", ", failures.Select(failure => failure.Hotkey +
+            (failure.Invalid ? " (invalid)" : " (error " + failure.NativeError + ")")).ToArray()), 90);
+        string guidance = "Hotkeys unavailable: " + keys +
+            ". Close the app using them, or open Profiles and hotkeys and save to retry.";
+        icon.ShowBalloonTip(8000, "Monitor Tools hotkey conflict", guidance, ToolTipIcon.Warning);
+        BuildMenu();
     }
 
     private string MonitorLabel(string stableId)
@@ -407,30 +427,24 @@ internal sealed class HotkeyWindow : NativeWindow, IDisposable
     private const uint ModControl = 0x0002;
     private const uint ModShift = 0x0004;
     private const uint ModWin = 0x0008;
-    private const uint ModNoRepeat = 0x4000;
-    private readonly Dictionary<int, string> registrations = new Dictionary<int, string>();
+    private readonly HotkeyRegistrationManager registrationManager;
     internal event Action<string> Pressed;
-
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
-    [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr window, int id);
-
-    internal HotkeyWindow() { CreateHandle(new CreateParams()); }
-
-    internal List<string> Replace(Dictionary<string, string> values)
+    internal event Action<List<HotkeyFailure>> RegistrationFailed
     {
-        foreach (int id in registrations.Keys.ToArray()) UnregisterHotKey(Handle, id);
-        registrations.Clear();
-        List<string> conflicts = new List<string>();
-        int next = 1;
-        foreach (KeyValuePair<string, string> pair in values)
-        {
-            uint modifiers; uint key;
-            if (String.IsNullOrWhiteSpace(pair.Value)) continue;
-            if (!TryParse(pair.Value, out modifiers, out key)) { conflicts.Add(pair.Value + " (invalid)"); continue; }
-            if (!RegisterHotKey(Handle, next, modifiers | ModNoRepeat, key)) { conflicts.Add(pair.Value); continue; }
-            registrations[next++] = pair.Key;
-        }
-        return conflicts;
+        add { registrationManager.RegistrationFailed += value; }
+        remove { registrationManager.RegistrationFailed -= value; }
+    }
+
+    internal HotkeyWindow()
+    {
+        CreateHandle(new CreateParams());
+        registrationManager = new HotkeyRegistrationManager(
+            new NativeHotkeyRegistrationBackend(Handle), new WinFormsHotkeyRetryScheduler(), TryParse, 10, 1000);
+    }
+
+    internal void Replace(Dictionary<string, string> values)
+    {
+        registrationManager.Replace(values);
     }
 
     private static bool TryParse(string value, out uint modifiers, out uint key)
@@ -468,16 +482,243 @@ internal sealed class HotkeyWindow : NativeWindow, IDisposable
         if (message.Msg == WmHotkey)
         {
             string profile;
-            if (registrations.TryGetValue(message.WParam.ToInt32(), out profile) && Pressed != null) Pressed(profile);
+            if (registrationManager.TryGetProfile(message.WParam.ToInt32(), out profile) && Pressed != null) Pressed(profile);
         }
         base.WndProc(ref message);
     }
 
     public void Dispose()
     {
-        foreach (int id in registrations.Keys.ToArray()) UnregisterHotKey(Handle, id);
-        registrations.Clear();
+        registrationManager.Dispose();
         DestroyHandle();
+    }
+}
+
+internal sealed class HotkeyFailure
+{
+    internal readonly string Hotkey;
+    internal readonly int NativeError;
+    internal readonly int Attempts;
+    internal readonly bool Invalid;
+
+    internal HotkeyFailure(string hotkey, int nativeError, int attempts, bool invalid)
+    {
+        Hotkey = hotkey;
+        NativeError = nativeError;
+        Attempts = attempts;
+        Invalid = invalid;
+    }
+}
+
+internal delegate bool HotkeyParser(string value, out uint modifiers, out uint key);
+
+internal interface IHotkeyRegistrationBackend
+{
+    bool Register(int id, uint modifiers, uint key, out int nativeError);
+    void Unregister(int id);
+}
+
+internal interface IHotkeyRetryScheduler : IDisposable
+{
+    void Schedule(int delayMilliseconds, Action callback);
+    void Cancel();
+}
+
+internal sealed class NativeHotkeyRegistrationBackend : IHotkeyRegistrationBackend
+{
+    private readonly IntPtr window;
+
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
+    [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr window, int id);
+
+    internal NativeHotkeyRegistrationBackend(IntPtr windowHandle) { window = windowHandle; }
+
+    public bool Register(int id, uint modifiers, uint key, out int nativeError)
+    {
+        bool registered = RegisterHotKey(window, id, modifiers, key);
+        nativeError = registered ? 0 : Marshal.GetLastWin32Error();
+        return registered;
+    }
+
+    public void Unregister(int id) { UnregisterHotKey(window, id); }
+}
+
+internal sealed class WinFormsHotkeyRetryScheduler : IHotkeyRetryScheduler
+{
+    private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+    private Action callback;
+
+    internal WinFormsHotkeyRetryScheduler()
+    {
+        timer.Tick += delegate
+        {
+            timer.Stop();
+            Action pending = callback;
+            callback = null;
+            if (pending != null) pending();
+        };
+    }
+
+    public void Schedule(int delayMilliseconds, Action scheduledCallback)
+    {
+        Cancel();
+        callback = scheduledCallback;
+        timer.Interval = delayMilliseconds;
+        timer.Start();
+    }
+
+    public void Cancel()
+    {
+        timer.Stop();
+        callback = null;
+    }
+
+    public void Dispose()
+    {
+        Cancel();
+        timer.Dispose();
+    }
+}
+
+internal sealed class HotkeyRegistrationManager : IDisposable
+{
+    private const uint ModNoRepeat = 0x4000;
+    private const int ErrorHotkeyAlreadyRegistered = 1409;
+
+    private sealed class PendingRegistration
+    {
+        internal int Id;
+        internal string Profile;
+        internal string Hotkey;
+        internal uint Modifiers;
+        internal uint Key;
+        internal int Attempts;
+        internal int LastError;
+    }
+
+    private readonly IHotkeyRegistrationBackend backend;
+    private readonly IHotkeyRetryScheduler scheduler;
+    private readonly HotkeyParser parser;
+    private readonly int maxAttempts;
+    private readonly int retryDelayMilliseconds;
+    private readonly Dictionary<int, string> registrations = new Dictionary<int, string>();
+    private readonly Dictionary<int, PendingRegistration> pending = new Dictionary<int, PendingRegistration>();
+    private int generation;
+    private bool disposed;
+
+    internal event Action<List<HotkeyFailure>> RegistrationFailed;
+
+    internal HotkeyRegistrationManager(IHotkeyRegistrationBackend registrationBackend,
+        IHotkeyRetryScheduler retryScheduler, HotkeyParser hotkeyParser, int attempts, int retryDelay)
+    {
+        if (registrationBackend == null) throw new ArgumentNullException("registrationBackend");
+        if (retryScheduler == null) throw new ArgumentNullException("retryScheduler");
+        if (hotkeyParser == null) throw new ArgumentNullException("hotkeyParser");
+        if (attempts < 1) throw new ArgumentOutOfRangeException("attempts");
+        if (retryDelay < 1) throw new ArgumentOutOfRangeException("retryDelay");
+        backend = registrationBackend;
+        scheduler = retryScheduler;
+        parser = hotkeyParser;
+        maxAttempts = attempts;
+        retryDelayMilliseconds = retryDelay;
+    }
+
+    internal void Replace(Dictionary<string, string> values)
+    {
+        if (disposed) throw new ObjectDisposedException("HotkeyRegistrationManager");
+        if (values == null) throw new ArgumentNullException("values");
+        generation++;
+        scheduler.Cancel();
+        foreach (int id in registrations.Keys.ToArray()) backend.Unregister(id);
+        registrations.Clear();
+        pending.Clear();
+
+        List<HotkeyFailure> failures = new List<HotkeyFailure>();
+        int next = 1;
+        foreach (KeyValuePair<string, string> pair in values)
+        {
+            if (String.IsNullOrWhiteSpace(pair.Value)) continue;
+            int id = next++;
+            uint modifiers; uint key;
+            if (!parser(pair.Value, out modifiers, out key))
+            {
+                failures.Add(new HotkeyFailure(pair.Value, 0, 0, true));
+                continue;
+            }
+            PendingRegistration item = new PendingRegistration {
+                Id = id, Profile = pair.Key, Hotkey = pair.Value,
+                Modifiers = modifiers | ModNoRepeat, Key = key, Attempts = 1
+            };
+            int nativeError;
+            if (backend.Register(item.Id, item.Modifiers, item.Key, out nativeError)) registrations[item.Id] = item.Profile;
+            else
+            {
+                item.LastError = nativeError;
+                if (nativeError == ErrorHotkeyAlreadyRegistered && item.Attempts < maxAttempts) pending[item.Id] = item;
+                else failures.Add(ToFailure(item));
+            }
+        }
+        NotifyFailures(failures);
+        ScheduleRetry();
+    }
+
+    internal bool TryGetProfile(int id, out string profile) { return registrations.TryGetValue(id, out profile); }
+
+    private void ScheduleRetry()
+    {
+        if (pending.Count == 0 || disposed) return;
+        int scheduledGeneration = generation;
+        scheduler.Schedule(retryDelayMilliseconds, delegate { Retry(scheduledGeneration); });
+    }
+
+    private void Retry(int scheduledGeneration)
+    {
+        if (disposed || scheduledGeneration != generation) return;
+        List<HotkeyFailure> failures = new List<HotkeyFailure>();
+        foreach (KeyValuePair<int, PendingRegistration> pair in pending.ToArray())
+        {
+            PendingRegistration item = pair.Value;
+            item.Attempts++;
+            int nativeError;
+            if (backend.Register(item.Id, item.Modifiers, item.Key, out nativeError))
+            {
+                registrations[item.Id] = item.Profile;
+                pending.Remove(item.Id);
+            }
+            else
+            {
+                item.LastError = nativeError;
+                if (nativeError != ErrorHotkeyAlreadyRegistered || item.Attempts >= maxAttempts)
+                {
+                    pending.Remove(item.Id);
+                    failures.Add(ToFailure(item));
+                }
+            }
+        }
+        NotifyFailures(failures);
+        ScheduleRetry();
+    }
+
+    private static HotkeyFailure ToFailure(PendingRegistration item)
+    {
+        return new HotkeyFailure(item.Hotkey, item.LastError, item.Attempts, false);
+    }
+
+    private void NotifyFailures(List<HotkeyFailure> failures)
+    {
+        if (failures.Count > 0 && RegistrationFailed != null) RegistrationFailed(failures);
+    }
+
+    public void Dispose()
+    {
+        if (disposed) return;
+        disposed = true;
+        generation++;
+        scheduler.Cancel();
+        foreach (int id in registrations.Keys.ToArray()) backend.Unregister(id);
+        registrations.Clear();
+        pending.Clear();
+        scheduler.Dispose();
     }
 }
 

@@ -12,6 +12,12 @@ Observed implementation validation: `Run-AllTests.ps1 -IncludeExecutable` passed
 
 The new guided calibration flow, brightness/volume scenes, and tray hotkeys still need user-observed testing on the actual desk. Earlier confirmed `0x05`/`0x0F` input results below remain the hardware evidence; software test passes are not visual switching verification.
 
+## Upgrade hotkey handoff (September 17, 2026)
+
+The first upgrade from shortcut hotkeys to the tray reported both `Ctrl+Alt+1` and `Ctrl+Alt+2` unavailable. The saved input choices and individual calibration records were intact. Inspection found one tray process and no remaining legacy profile shortcuts. A subsequent native registration probe could acquire and immediately release both keys; restarting the installed tray then made both unavailable to the probe (Windows error 1409), consistent with the tray successfully acquiring them. No profile was invoked or monitor input changed during this diagnosis. The timing is consistent with Explorer releasing the deleted shortcut bindings after the tray's initial attempt.
+
+Legacy shortcut removal now clears and saves each binding, flushes its shell update notification, and then removes it with a deletion notification. Regression tests check this order and ensure `-WhatIf` performs none of those actions. The tray retries error 1409 up to ten total attempts, one second apart, without dropping successful registrations. Mock-only tests cover recovery, persistent/nontransient failures, configuration replacement, and disposal.
+
 ## Automated visual integration (September 17, 2026)
 
 Nine client-area fixtures render the compiled setup and profile editor with synthetic data at 96 DPI. They cover default/verified/failed/busy setup states, compact sizes, six-monitor scrolling, and editing/saving a brightness scene. Initial layout assertions caught the editor grid covering its instructions and clipped column headings; docking order and automatic heading height were corrected. Reviewed PNG baselines and repeated local comparisons pass. Comparator self-tests also reject missing content, moved controls, dimension changes, and corrupt inputs.

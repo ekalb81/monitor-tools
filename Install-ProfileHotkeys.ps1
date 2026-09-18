@@ -15,7 +15,35 @@ if ($Uninstall) {
     foreach ($name in @("This PC Profile.lnk", "Other PC Profile.lnk")) {
         $shortcutPath = Join-Path $shortcutDirectory $name
         if ((Test-Path -LiteralPath $shortcutPath -PathType Leaf) -and $PSCmdlet.ShouldProcess($shortcutPath, "Remove profile hotkey")) {
+            if (-not ('MonitorToolsShortcutNotificationsV1' -as [type])) {
+                Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class MonitorToolsShortcutNotificationsV1 {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern void SHChangeNotify(uint change, uint flags, string item, IntPtr unused);
+    public static void Updated(string path) { SHChangeNotify(0x00002000, 0x00001005, path, IntPtr.Zero); }
+    public static void Deleted(string path) { SHChangeNotify(0x00000004, 0x00001005, path, IntPtr.Zero); }
+}
+'@
+            }
+            # Let Explorer release its shortcut hotkey before the tray claims it.
+            # Notify with SHCNF_PATHW | SHCNF_FLUSH so delivery is not merely queued.
+            $shell = $null
+            $shortcut = $null
+            try {
+                $shell = New-Object -ComObject WScript.Shell
+                $shortcut = $shell.CreateShortcut($shortcutPath)
+                $shortcut.Hotkey = ''
+                $shortcut.Save()
+                [MonitorToolsShortcutNotificationsV1]::Updated($shortcutPath)
+            }
+            finally {
+                if ($null -ne $shortcut -and [Runtime.InteropServices.Marshal]::IsComObject($shortcut)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) }
+                if ($null -ne $shell -and [Runtime.InteropServices.Marshal]::IsComObject($shell)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
+            }
             Remove-Item -LiteralPath $shortcutPath
+            [MonitorToolsShortcutNotificationsV1]::Deleted($shortcutPath)
         }
     }
     return

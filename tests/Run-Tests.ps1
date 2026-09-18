@@ -215,7 +215,7 @@ Write-Output 'PASS: launcher previews, configuration, saving, and failure loggin
 
 # Shadow shortcut and directory creation to run the actual installer without writes.
 $shortcuts = New-Object System.Collections.Generic.List[object]
-$shortcutState = [pscustomobject]@{ Shortcuts = $shortcuts; DirectoryCreates = 0 }
+$shortcutState = [pscustomobject]@{ Shortcuts = $shortcuts; DirectoryCreates = 0; Removing = $false }
 $fakeShell = [pscustomobject]@{}
 $fakeShell | Add-Member -MemberType ScriptMethod -Name CreateShortcut -Value {
     param($path)
@@ -223,7 +223,14 @@ $fakeShell | Add-Member -MemberType ScriptMethod -Name CreateShortcut -Value {
         Path = $path; TargetPath = ''; Arguments = ''; WorkingDirectory = ''
         Description = ''; IconLocation = ''; Hotkey = ''; Saved = $false
     }
-    $shortcut | Add-Member -MemberType ScriptMethod -Name Save -Value { $this.Saved = $true }
+    if ($shortcutState.Removing) { $shortcut.Hotkey = 'CTRL+ALT+1' }
+    $shortcut | Add-Member -MemberType ScriptMethod -Name Save -Value {
+        $this.Saved = $true
+        if ($shortcutState.Removing) {
+            Assert-Equal $this.Hotkey '' 'Clear the legacy binding before saving its shortcut'
+            [MonitorToolsShortcutNotificationsV1]::Events.Add('save:' + $this.Path)
+        }
+    }
     $shortcutState.Shortcuts.Add($shortcut)
     return $shortcut
 }
@@ -259,6 +266,15 @@ Assert-Equal $shortcutState.DirectoryCreates 0 'Missing executable must prevent 
 Write-Output 'PASS: shortcut targets and missing-executable validation'
 
 # Removal must touch only the two known shortcuts and must honor WhatIf.
+Add-Type @'
+using System.Collections.Generic;
+public static class MonitorToolsShortcutNotificationsV1 {
+    public static readonly List<string> Events = new List<string>();
+    public static void Updated(string path) { Events.Add("update:" + path); }
+    public static void Deleted(string path) { Events.Add("delete:" + path); }
+}
+'@
+$shortcutState.Removing = $true
 $removalState = [pscustomobject]@{ Paths = @() }
 $shortcutDirectory = Join-Path ([Environment]::GetFolderPath('Programs')) 'Monitor Tools'
 $expectedRemovals = @(
@@ -273,10 +289,16 @@ function Remove-Item {
     param([string]$LiteralPath)
     Assert-Equal ($expectedRemovals -contains $LiteralPath) $true 'Unexpected shortcut removal'
     $removalState.Paths += $LiteralPath
+    [MonitorToolsShortcutNotificationsV1]::Events.Add('remove:' + $LiteralPath)
 }
 & $installerPath -Uninstall -WhatIf | Out-Null
 Assert-Equal $removalState.Paths.Count 0 'Uninstall preview must not remove shortcuts'
+Assert-Equal $shortcuts.Count 0 'Uninstall preview must not open or save shortcuts'
+Assert-Equal ([MonitorToolsShortcutNotificationsV1]::Events.Count) 0 'Uninstall preview must not notify Explorer'
 & $installerPath -Uninstall | Out-Null
 Assert-Equal ($removalState.Paths -join ',') ($expectedRemovals -join ',') 'Remove exactly the known shortcuts'
-Write-Output 'PASS: hotkey removal and removal preview'
+$expectedEvents = foreach ($path in $expectedRemovals) { "save:$path"; "update:$path"; "remove:$path"; "delete:$path" }
+Assert-Equal ([MonitorToolsShortcutNotificationsV1]::Events -join '|') ($expectedEvents -join '|') 'Clear/save/notify before removal, then flush deletion notification'
+Assert-Equal $shortcuts.Count 2 'Only the two legacy shortcuts may be opened'
+Write-Output 'PASS: legacy hotkey handoff notifications and removal preview'
 Write-Output "All regression tests passed on PowerShell $($PSVersionTable.PSVersion)."
